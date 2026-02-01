@@ -9,9 +9,10 @@ and streams them to a remote Cloud API.
 import asyncio
 import json
 import logging
+import signal
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -88,92 +89,90 @@ class DatabaseReader:
     def fetch_events(self, last_event_id: int, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
         """
         Fetch events from the database starting after last_event_id.
-        
+
         Uses the newer HA database schema where event_data is in a separate table.
         """
         events = []
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # Query events with joined event_data (HA 2022.6+ schema)
-            query = """
-                SELECT 
-                    e.event_id,
-                    e.event_type,
-                    e.time_fired_ts,
-                    e.origin_idx,
-                    ed.shared_data as event_data
-                FROM events e
-                LEFT JOIN event_data ed ON e.data_id = ed.data_id
-                WHERE e.event_id > ?
-                ORDER BY e.event_id ASC
-                LIMIT ?
-            """
-            cursor.execute(query, (last_event_id, batch_size))
-            rows = cursor.fetchall()
-            
-            for row in rows:
-                event = self._parse_event_row(row)
-                if event:
-                    events.append(event)
-            
-            conn.close()
-            logger.info(f"Fetched {len(events)} events from database")
-            
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Query events with joined event_data (HA 2022.6+ schema)
+                query = """
+                    SELECT
+                        e.event_id,
+                        e.event_type,
+                        e.time_fired_ts,
+                        e.origin_idx,
+                        ed.shared_data as event_data
+                    FROM events e
+                    LEFT JOIN event_data ed ON e.data_id = ed.data_id
+                    WHERE e.event_id > ?
+                    ORDER BY e.event_id ASC
+                    LIMIT ?
+                """
+                cursor.execute(query, (last_event_id, batch_size))
+                rows = cursor.fetchall()
+
+                for row in rows:
+                    event = self._parse_event_row(row)
+                    if event:
+                        events.append(event)
+
+                logger.info(f"Fetched {len(events)} events from database")
+
         except sqlite3.Error as e:
             logger.error(f"Database error fetching events: {e}")
-        
+
         return events
 
     def fetch_states(self, last_state_id: int, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
         """
         Fetch states from the database starting after last_state_id.
-        
+
         Uses the newer HA database schema where attributes are in a separate table.
         """
         states = []
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # Query states with joined state_attributes and states_meta (HA 2022.6+ schema)
-            query = """
-                SELECT 
-                    s.state_id,
-                    sm.entity_id,
-                    s.state,
-                    s.last_updated_ts,
-                    s.last_changed_ts,
-                    sa.shared_attrs as attributes
-                FROM states s
-                LEFT JOIN states_meta sm ON s.metadata_id = sm.metadata_id
-                LEFT JOIN state_attributes sa ON s.attributes_id = sa.attributes_id
-                WHERE s.state_id > ?
-                ORDER BY s.state_id ASC
-                LIMIT ?
-            """
-            cursor.execute(query, (last_state_id, batch_size))
-            rows = cursor.fetchall()
-            
-            for row in rows:
-                state = self._parse_state_row(row)
-                if state:
-                    states.append(state)
-            
-            conn.close()
-            logger.info(f"Fetched {len(states)} states from database")
-            
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Query states with joined state_attributes and states_meta (HA 2022.6+ schema)
+                query = """
+                    SELECT
+                        s.state_id,
+                        sm.entity_id,
+                        s.state,
+                        s.last_updated_ts,
+                        s.last_changed_ts,
+                        sa.shared_attrs as attributes
+                    FROM states s
+                    LEFT JOIN states_meta sm ON s.metadata_id = sm.metadata_id
+                    LEFT JOIN state_attributes sa ON s.attributes_id = sa.attributes_id
+                    WHERE s.state_id > ?
+                    ORDER BY s.state_id ASC
+                    LIMIT ?
+                """
+                cursor.execute(query, (last_state_id, batch_size))
+                rows = cursor.fetchall()
+
+                for row in rows:
+                    state = self._parse_state_row(row)
+                    if state:
+                        states.append(state)
+
+                logger.info(f"Fetched {len(states)} states from database")
+
         except sqlite3.Error as e:
             logger.error(f"Database error fetching states: {e}")
-        
+
         return states
 
     def _parse_event_row(self, row: sqlite3.Row) -> Optional[dict[str, Any]]:
         """Parse a database row into an event dictionary."""
         try:
             # Parse timestamp from Unix timestamp
-            timestamp = datetime.utcfromtimestamp(row["time_fired_ts"]).isoformat() + "Z"
+            timestamp = datetime.fromtimestamp(row["time_fired_ts"], tz=timezone.utc).isoformat()
             
             # Parse event data JSON
             attributes = {}
@@ -201,7 +200,7 @@ class DatabaseReader:
         """Parse a database row into a state dictionary."""
         try:
             # Parse timestamp from Unix timestamp
-            timestamp = datetime.utcfromtimestamp(row["last_updated_ts"]).isoformat() + "Z"
+            timestamp = datetime.fromtimestamp(row["last_updated_ts"], tz=timezone.utc).isoformat()
             
             # Parse attributes JSON
             attributes = {}
@@ -238,11 +237,24 @@ class CloudApiClient:
         self.api_endpoint = api_endpoint
         self.auth_token = auth_token
         self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create a reusable HTTP session."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(timeout=self.timeout)
+        return self._session
+
+    async def close(self) -> None:
+        """Close the HTTP session."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
     async def send_batch(self, records: list[dict[str, Any]]) -> bool:
         """
         Send a batch of records to the Cloud API.
-        
+
         Returns True if successful, False otherwise.
         """
         if not records:
@@ -260,30 +272,30 @@ class CloudApiClient:
         payload = {
             "records": records,
             "source": "home_assistant",
-            "sent_at": datetime.utcnow().isoformat() + "Z",
+            "sent_at": datetime.now(timezone.utc).isoformat(),
         }
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                    async with session.post(
-                        self.api_endpoint,
-                        headers=headers,
-                        json=payload,
-                    ) as response:
-                        if response.status == 200 or response.status == 201:
-                            logger.info(f"Successfully sent {len(records)} records to API")
-                            return True
-                        elif response.status >= 500:
-                            logger.warning(
-                                f"Server error {response.status} on attempt {attempt}/{MAX_RETRIES}"
-                            )
-                        else:
-                            error_text = await response.text()
-                            logger.error(
-                                f"API error {response.status}: {error_text}"
-                            )
-                            return False
+                session = await self._get_session()
+                async with session.post(
+                    self.api_endpoint,
+                    headers=headers,
+                    json=payload,
+                ) as response:
+                    if response.status == 200 or response.status == 201:
+                        logger.info(f"Successfully sent {len(records)} records to API")
+                        return True
+                    elif response.status >= 500:
+                        logger.warning(
+                            f"Server error {response.status} on attempt {attempt}/{MAX_RETRIES}"
+                        )
+                    else:
+                        error_text = await response.text()
+                        logger.error(
+                            f"API error {response.status}: {error_text}"
+                        )
+                        return False
 
             except asyncio.TimeoutError:
                 logger.warning(f"Request timeout on attempt {attempt}/{MAX_RETRIES}")
@@ -294,8 +306,9 @@ class CloudApiClient:
                 return False
 
             if attempt < MAX_RETRIES:
-                logger.info(f"Retrying in {RETRY_DELAY_SECONDS} seconds...")
-                await asyncio.sleep(RETRY_DELAY_SECONDS)
+                delay = RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+                logger.info(f"Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
 
         logger.error(f"Failed to send batch after {MAX_RETRIES} attempts")
         return False
@@ -317,6 +330,8 @@ class EventExtractor:
         logger.info(f"API endpoint: {API_ENDPOINT}")
         logger.info(f"Sync interval: {SYNC_INTERVAL_MINUTES} minutes")
         logger.info(f"Batch size: {BATCH_SIZE}")
+        token_status = f"***{CLOUD_AUTH_TOKEN[-4:]}" if len(CLOUD_AUTH_TOKEN) > 4 else ("set (short)" if CLOUD_AUTH_TOKEN else "NOT SET")
+        logger.info(f"Auth token: {token_status}")
 
         # Validate database exists
         if not Path(DATABASE_PATH).exists():
@@ -324,14 +339,23 @@ class EventExtractor:
             logger.error("Make sure the add-on has access to the config directory")
             return
 
-        while self.running:
-            try:
-                await self.sync_cycle()
-            except Exception as e:
-                logger.error(f"Error in sync cycle: {e}")
+        try:
+            while self.running:
+                try:
+                    await self.sync_cycle()
+                except Exception as e:
+                    logger.error(f"Error in sync cycle: {e}")
 
-            logger.info(f"Sleeping for {SYNC_INTERVAL_MINUTES} minutes...")
-            await asyncio.sleep(SYNC_INTERVAL_MINUTES * 60)
+                if not self.running:
+                    break
+
+                logger.info(f"Sleeping for {SYNC_INTERVAL_MINUTES} minutes...")
+                try:
+                    await asyncio.sleep(SYNC_INTERVAL_MINUTES * 60)
+                except asyncio.CancelledError:
+                    break
+        finally:
+            await self.api_client.close()
 
     async def sync_cycle(self) -> None:
         """Perform one sync cycle: fetch and send data."""
@@ -342,31 +366,30 @@ class EventExtractor:
         logger.info(f"Starting sync cycle from event_id={last_event_id}, state_id={last_state_id}")
 
         # Process events
-        await self._process_events(last_event_id)
-        
-        # Process states
-        await self._process_states(last_state_id)
+        last_event_id = await self._process_events(last_event_id)
 
-    async def _process_events(self, last_event_id: int) -> None:
-        """Process events in batches."""
+        # Process states
+        last_state_id = await self._process_states(last_state_id)
+
+        # Save checkpoint once at the end of the cycle
+        self.checkpoint_manager.save(last_event_id, last_state_id)
+
+    async def _process_events(self, last_event_id: int) -> int:
+        """Process events in batches. Returns the latest processed event ID."""
         current_event_id = last_event_id
-        
+
         while True:
             events = self.db_reader.fetch_events(current_event_id, BATCH_SIZE)
-            
+
             if not events:
                 logger.info("No new events to process")
                 break
 
             success = await self.api_client.send_batch(events)
-            
+
             if success:
-                # Update checkpoint with the last processed event ID
-                new_event_id = max(e["id"] for e in events)
-                checkpoint = self.checkpoint_manager.load()
-                self.checkpoint_manager.save(new_event_id, checkpoint.get("last_state_id", 0))
-                current_event_id = new_event_id
-                logger.info(f"Updated event checkpoint to {new_event_id}")
+                current_event_id = max(e["id"] for e in events)
+                logger.info(f"Processed events up to id={current_event_id}")
             else:
                 logger.warning("Failed to send events batch, will retry next cycle")
                 break
@@ -375,26 +398,24 @@ class EventExtractor:
             if len(events) < BATCH_SIZE:
                 break
 
-    async def _process_states(self, last_state_id: int) -> None:
-        """Process states in batches."""
+        return current_event_id
+
+    async def _process_states(self, last_state_id: int) -> int:
+        """Process states in batches. Returns the latest processed state ID."""
         current_state_id = last_state_id
-        
+
         while True:
             states = self.db_reader.fetch_states(current_state_id, BATCH_SIZE)
-            
+
             if not states:
                 logger.info("No new states to process")
                 break
 
             success = await self.api_client.send_batch(states)
-            
+
             if success:
-                # Update checkpoint with the last processed state ID
-                new_state_id = max(s["id"] for s in states)
-                checkpoint = self.checkpoint_manager.load()
-                self.checkpoint_manager.save(checkpoint.get("last_event_id", 0), new_state_id)
-                current_state_id = new_state_id
-                logger.info(f"Updated state checkpoint to {new_state_id}")
+                current_state_id = max(s["id"] for s in states)
+                logger.info(f"Processed states up to id={current_state_id}")
             else:
                 logger.warning("Failed to send states batch, will retry next cycle")
                 break
@@ -403,16 +424,27 @@ class EventExtractor:
             if len(states) < BATCH_SIZE:
                 break
 
+        return current_state_id
+
 
 def main() -> None:
     """Entry point for the add-on."""
     extractor = EventExtractor()
-    
-    try:
-        asyncio.run(extractor.run())
-    except KeyboardInterrupt:
-        logger.info("Shutting down Life Emotions HA Plugin...")
+
+    loop = asyncio.new_event_loop()
+
+    def _shutdown_handler() -> None:
+        logger.info("Shutdown signal received, stopping...")
         extractor.running = False
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _shutdown_handler)
+
+    try:
+        loop.run_until_complete(extractor.run())
+    finally:
+        loop.close()
+        logger.info("Life Emotions HA Plugin stopped")
 
 
 if __name__ == "__main__":
