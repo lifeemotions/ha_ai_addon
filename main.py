@@ -21,7 +21,6 @@ import aiohttp
 from const import (
     API_ENDPOINT,
     BATCH_SIZE,
-    CHECKPOINT_FILE,
     CLOUD_AUTH_TOKEN,
     DATABASE_PATH,
     DEFAULT_API_ENDPOINT,
@@ -39,40 +38,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("lifeemotions_ha_plugin")
-
-
-class CheckpointManager:
-    """Manages checkpoint state for tracking processed events."""
-
-    def __init__(self, checkpoint_file: str = CHECKPOINT_FILE):
-        self.checkpoint_file = Path(checkpoint_file)
-        self._ensure_data_dir()
-
-    def _ensure_data_dir(self) -> None:
-        """Ensure the data directory exists."""
-        self.checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-
-    def load(self) -> dict[str, int]:
-        """Load checkpoint from file."""
-        if self.checkpoint_file.exists():
-            try:
-                with open(self.checkpoint_file, "r") as f:
-                    data = json.load(f)
-                    logger.info(f"Loaded checkpoint: {data}")
-                    return data
-            except (json.JSONDecodeError, IOError) as e:
-                logger.warning(f"Failed to load checkpoint: {e}. Starting fresh.")
-        return {"last_event_id": 0, "last_state_id": 0}
-
-    def save(self, last_event_id: int, last_state_id: int) -> None:
-        """Save checkpoint to file."""
-        data = {"last_event_id": last_event_id, "last_state_id": last_state_id}
-        try:
-            with open(self.checkpoint_file, "w") as f:
-                json.dump(data, f)
-            logger.debug(f"Saved checkpoint: {data}")
-        except IOError as e:
-            logger.error(f"Failed to save checkpoint: {e}")
 
 
 class DatabaseReader:
@@ -102,9 +67,9 @@ class DatabaseReader:
                 logger.info("Using HA 2022.6+ schema (event_type column on events table)")
         return self._has_event_types_table
 
-    def fetch_events(self, last_event_id: int, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
+    def fetch_events(self, after_timestamp: float, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
         """
-        Fetch events from the database starting after last_event_id.
+        Fetch events from the database with time_fired_ts > after_timestamp.
 
         Supports both HA 2022.6+ schema (event_type on events table) and
         HA 2023.4+ schema (event_type in separate event_types table).
@@ -126,8 +91,8 @@ class DatabaseReader:
                         FROM events e
                         LEFT JOIN event_types et ON e.event_type_id = et.event_type_id
                         LEFT JOIN event_data ed ON e.data_id = ed.data_id
-                        WHERE e.event_id > ?
-                        ORDER BY e.event_id ASC
+                        WHERE e.time_fired_ts > ?
+                        ORDER BY e.time_fired_ts ASC
                         LIMIT ?
                     """
                 else:
@@ -141,12 +106,12 @@ class DatabaseReader:
                             ed.shared_data as event_data
                         FROM events e
                         LEFT JOIN event_data ed ON e.data_id = ed.data_id
-                        WHERE e.event_id > ?
-                        ORDER BY e.event_id ASC
+                        WHERE e.time_fired_ts > ?
+                        ORDER BY e.time_fired_ts ASC
                         LIMIT ?
                     """
 
-                cursor.execute(query, (last_event_id, batch_size))
+                cursor.execute(query, (after_timestamp, batch_size))
                 rows = cursor.fetchall()
 
                 for row in rows:
@@ -166,9 +131,9 @@ class DatabaseReader:
 
         return events
 
-    def fetch_states(self, last_state_id: int, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
+    def fetch_states(self, after_timestamp: float, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
         """
-        Fetch states from the database starting after last_state_id.
+        Fetch states from the database with last_updated_ts > after_timestamp.
 
         Uses the newer HA database schema where attributes are in a separate table.
         """
@@ -177,7 +142,6 @@ class DatabaseReader:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Query states with joined state_attributes and states_meta (HA 2022.6+ schema)
                 query = """
                     SELECT
                         s.state_id,
@@ -189,11 +153,11 @@ class DatabaseReader:
                     FROM states s
                     LEFT JOIN states_meta sm ON s.metadata_id = sm.metadata_id
                     LEFT JOIN state_attributes sa ON s.attributes_id = sa.attributes_id
-                    WHERE s.state_id > ?
-                    ORDER BY s.state_id ASC
+                    WHERE s.last_updated_ts > ?
+                    ORDER BY s.last_updated_ts ASC
                     LIMIT ?
                 """
-                cursor.execute(query, (last_state_id, batch_size))
+                cursor.execute(query, (after_timestamp, batch_size))
                 rows = cursor.fetchall()
 
                 for row in rows:
@@ -216,9 +180,9 @@ class DatabaseReader:
     def _parse_event_row(self, row: sqlite3.Row) -> Optional[dict[str, Any]]:
         """Parse a database row into an event dictionary."""
         try:
-            # Parse timestamp from Unix timestamp
-            timestamp = datetime.fromtimestamp(row["time_fired_ts"], tz=timezone.utc).isoformat()
-            
+            raw_ts = row["time_fired_ts"]
+            timestamp = datetime.fromtimestamp(raw_ts, tz=timezone.utc).isoformat()
+
             # Parse event data JSON
             attributes = {}
             if row["event_data"]:
@@ -226,11 +190,12 @@ class DatabaseReader:
                     attributes = json.loads(row["event_data"])
                 except json.JSONDecodeError:
                     pass
-            
+
             return {
                 "id": row["event_id"],
                 "type": "event",
                 "timestamp": timestamp,
+                "raw_timestamp": raw_ts,
                 "entity_id": attributes.get("entity_id", ""),
                 "event_type": row["event_type"],
                 "state": None,
@@ -244,9 +209,9 @@ class DatabaseReader:
     def _parse_state_row(self, row: sqlite3.Row) -> Optional[dict[str, Any]]:
         """Parse a database row into a state dictionary."""
         try:
-            # Parse timestamp from Unix timestamp
-            timestamp = datetime.fromtimestamp(row["last_updated_ts"], tz=timezone.utc).isoformat()
-            
+            raw_ts = row["last_updated_ts"]
+            timestamp = datetime.fromtimestamp(raw_ts, tz=timezone.utc).isoformat()
+
             # Parse attributes JSON
             attributes = {}
             if row["attributes"]:
@@ -254,11 +219,12 @@ class DatabaseReader:
                     attributes = json.loads(row["attributes"])
                 except json.JSONDecodeError:
                     pass
-            
+
             return {
                 "id": row["state_id"],
                 "type": "state",
                 "timestamp": timestamp,
+                "raw_timestamp": raw_ts,
                 "entity_id": row["entity_id"] or "",
                 "event_type": "state_changed",
                 "state": row["state"],
@@ -295,6 +261,71 @@ class CloudApiClient:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+
+    async def fetch_checkpoint(self) -> Optional[float]:
+        """
+        Fetch the checkpoint timestamp from the Cloud API.
+
+        Returns the last_timestamp (Unix float) on success, or None on failure.
+        """
+        if not self.auth_token:
+            logger.error("No authentication token configured. Cannot fetch checkpoint.")
+            return None
+
+        if self.api_endpoint == DEFAULT_API_ENDPOINT:
+            logger.error("API endpoint is still the default placeholder. Configure a real endpoint.")
+            return None
+
+        headers = {
+            "Authorization": f"Bearer {self.auth_token}",
+        }
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                session = await self._get_session()
+                async with session.get(
+                    self.api_endpoint,
+                    headers=headers,
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        last_ts = data.get("last_timestamp")
+                        if last_ts is not None:
+                            last_ts = float(last_ts)
+                            logger.info(f"Fetched checkpoint from API: last_timestamp={last_ts}")
+                            return last_ts
+                        else:
+                            logger.error("API response missing 'last_timestamp' field")
+                            return None
+                    elif response.status >= 500:
+                        logger.warning(
+                            f"Server error {response.status} fetching checkpoint on attempt {attempt}/{MAX_RETRIES}"
+                        )
+                    else:
+                        error_text = await response.text()
+                        logger.error(
+                            f"API error {response.status} fetching checkpoint: {error_text}"
+                        )
+                        return None
+
+            except asyncio.TimeoutError:
+                logger.warning(f"Checkpoint request timeout on attempt {attempt}/{MAX_RETRIES}")
+            except aiohttp.ClientError as e:
+                logger.warning(f"Network error fetching checkpoint on attempt {attempt}/{MAX_RETRIES}: {e}")
+            except (ValueError, KeyError) as e:
+                logger.error(f"Invalid checkpoint response from API: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Unexpected error fetching checkpoint: {e}")
+                return None
+
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+                logger.info(f"Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
+
+        logger.error(f"Failed to fetch checkpoint after {MAX_RETRIES} attempts")
+        return None
 
     async def send_batch(self, records: list[dict[str, Any]]) -> bool:
         """
@@ -367,7 +398,6 @@ class EventExtractor:
     """Main orchestrator for the event extraction process."""
 
     def __init__(self):
-        self.checkpoint_manager = CheckpointManager()
         self.db_reader = DatabaseReader()
         self.api_client = CloudApiClient()
         self.running = True
@@ -410,28 +440,27 @@ class EventExtractor:
             await self.api_client.close()
 
     async def sync_cycle(self) -> None:
-        """Perform one sync cycle: fetch and send data."""
-        checkpoint = self.checkpoint_manager.load()
-        last_event_id = checkpoint.get("last_event_id", 0)
-        last_state_id = checkpoint.get("last_state_id", 0)
+        """Perform one sync cycle: fetch checkpoint from API, then fetch and send data."""
+        last_timestamp = await self.api_client.fetch_checkpoint()
 
-        logger.info(f"Starting sync cycle from event_id={last_event_id}, state_id={last_state_id}")
+        if last_timestamp is None:
+            logger.warning("Could not fetch checkpoint from API, skipping sync cycle")
+            return
+
+        logger.info(f"Starting sync cycle from timestamp={last_timestamp}")
 
         # Process events
-        last_event_id = await self._process_events(last_event_id)
+        await self._process_events(last_timestamp)
 
         # Process states
-        last_state_id = await self._process_states(last_state_id)
+        await self._process_states(last_timestamp)
 
-        # Save checkpoint once at the end of the cycle
-        self.checkpoint_manager.save(last_event_id, last_state_id)
-
-    async def _process_events(self, last_event_id: int) -> int:
-        """Process events in batches. Returns the latest processed event ID."""
-        current_event_id = last_event_id
+    async def _process_events(self, after_timestamp: float) -> float:
+        """Process events in batches. Returns the latest processed timestamp."""
+        current_timestamp = after_timestamp
 
         while True:
-            events = self.db_reader.fetch_events(current_event_id, BATCH_SIZE)
+            events = self.db_reader.fetch_events(current_timestamp, BATCH_SIZE)
 
             if not events:
                 logger.info("No new events to process")
@@ -440,8 +469,8 @@ class EventExtractor:
             success = await self.api_client.send_batch(events)
 
             if success:
-                current_event_id = max(e["id"] for e in events)
-                logger.info(f"Processed events up to id={current_event_id}")
+                current_timestamp = max(e["raw_timestamp"] for e in events)
+                logger.info(f"Processed events up to timestamp={current_timestamp}")
             else:
                 logger.warning("Failed to send events batch, will retry next cycle")
                 break
@@ -450,14 +479,14 @@ class EventExtractor:
             if len(events) < BATCH_SIZE:
                 break
 
-        return current_event_id
+        return current_timestamp
 
-    async def _process_states(self, last_state_id: int) -> int:
-        """Process states in batches. Returns the latest processed state ID."""
-        current_state_id = last_state_id
+    async def _process_states(self, after_timestamp: float) -> float:
+        """Process states in batches. Returns the latest processed timestamp."""
+        current_timestamp = after_timestamp
 
         while True:
-            states = self.db_reader.fetch_states(current_state_id, BATCH_SIZE)
+            states = self.db_reader.fetch_states(current_timestamp, BATCH_SIZE)
 
             if not states:
                 logger.info("No new states to process")
@@ -466,8 +495,8 @@ class EventExtractor:
             success = await self.api_client.send_batch(states)
 
             if success:
-                current_state_id = max(s["id"] for s in states)
-                logger.info(f"Processed states up to id={current_state_id}")
+                current_timestamp = max(s["raw_timestamp"] for s in states)
+                logger.info(f"Processed states up to timestamp={current_timestamp}")
             else:
                 logger.warning("Failed to send states batch, will retry next cycle")
                 break
@@ -476,7 +505,7 @@ class EventExtractor:
             if len(states) < BATCH_SIZE:
                 break
 
-        return current_state_id
+        return current_timestamp
 
 
 def main() -> None:

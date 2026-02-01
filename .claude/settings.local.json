@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(tree:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(pip3 install:*)",
+      "Bash(source:*)",
+      "Bash(PYTHONPATH=. python -m pytest:*)",
+      "Bash(PYTHONPATH=. .venv/bin/python -m pytest:*)"
     ]
   }
 }

@@ -8,9 +8,6 @@ logger = logging.getLogger("lifeemotions_ha_plugin")
 # Database configuration
 DATABASE_PATH = "/config/home-assistant_v2.db"
 
-# Checkpoint file location (persistent storage)
-CHECKPOINT_FILE = "/data/checkpoint.json"
-
 # API configuration
 DEFAULT_API_ENDPOINT = "https://api.example-cloud.com/v1/ingest"
 API_ENDPOINT = os.environ.get("API_ENDPOINT", DEFAULT_API_ENDPOINT)
