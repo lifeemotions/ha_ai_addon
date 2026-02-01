@@ -5,7 +5,7 @@ This Home Assistant Add-on extracts historical device events and state changes f
 ## Features
 
 - **Database Access**: Reads from the Home Assistant SQLite database (`/config/home-assistant_v2.db`)
-- **Checkpoint System**: Tracks the last processed event/state ID to avoid duplicate data on restart
+- **Checkpoint System**: Fetches the last processed timestamp from the Cloud API to avoid sending duplicate data
 - **Batch Processing**: Efficiently queries data in configurable batch sizes (default: 100 rows)
 - **Resilient API Calls**: Automatic retry logic with exponential backoff for network failures
 - **Bearer Token Authentication**: Secure authentication with the remote API
@@ -43,6 +43,7 @@ The add-on sends data to the Cloud API in the following JSON format:
       "id": 12345,
       "type": "event|state",
       "timestamp": "2025-12-19T10:30:00.000000Z",
+      "raw_timestamp": 1734605400.0,
       "entity_id": "light.living_room",
       "event_type": "state_changed",
       "state": "on",
@@ -58,27 +59,17 @@ The add-on sends data to the Cloud API in the following JSON format:
 }
 ```
 
-## API Requirements
-
-Your Cloud API endpoint should:
-
-1. Accept POST requests with JSON body
-2. Accept `Authorization: Bearer <token>` header
-3. Return HTTP 200 or 201 on success
-4. Handle the payload schema described above
-
 ## Checkpoint Persistence
 
-The add-on maintains a checkpoint file at `/data/checkpoint.json` containing:
+The add-on fetches the last processed timestamp from the Cloud API on each sync cycle. The API returns:
 
 ```json
 {
-  "last_event_id": 12345,
-  "last_state_id": 67890
+  "last_timestamp": 1734605400.0
 }
 ```
 
-This ensures data is not duplicated if the add-on restarts.
+All events and states with timestamps after this value are fetched and sent. This ensures no duplicate data is sent across sync cycles.
 
 ## Logs
 
