@@ -1,4 +1,4 @@
-"""Shared fixtures for Life Emotions HA Plugin tests."""
+"""Shared fixtures for Life Emotions AI tests."""
 
 import json
 import sqlite3

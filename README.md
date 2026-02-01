@@ -1,4 +1,4 @@
-# Life Emotions HA Plugin Add-on
+# Life Emotions AI Add-on
 
 This Home Assistant Add-on extracts historical device events and state changes from the local SQLite database and streams them to a remote Cloud API.
 
@@ -13,7 +13,7 @@ This Home Assistant Add-on extracts historical device events and state changes f
 ## Installation
 
 1. Add this repository to your Home Assistant Add-on Store
-2. Install the "Life Emotions HA Plugin" add-on
+2. Install the "Life Emotions AI" add-on
 3. Configure the add-on with your Cloud API credentials
 
 ## Configuration
@@ -125,7 +125,7 @@ python main.py
 ### Building the Docker Image
 
 ```bash
-docker build -t lifeemotions-ha-plugin .
+docker build -t lifeemotions-ai-addon .
 ```
 
 ## License

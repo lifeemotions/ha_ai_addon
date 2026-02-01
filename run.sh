@@ -1,6 +1,6 @@
 #!/usr/bin/with-contenv bashio
 # ==============================================================================
-# Home Assistant Add-on: Life Emotions HA Plugin
+# Home Assistant Add-on: Life Emotions AI
 # Runs the add-on script
 # ==============================================================================
 
@@ -10,7 +10,7 @@ export SYNC_INTERVAL_MINUTES=$(bashio::config 'sync_interval_minutes')
 export API_ENDPOINT=$(bashio::config 'api_endpoint')
 export BATCH_SIZE=$(bashio::config 'batch_size')
 
-bashio::log.info "Starting Life Emotions HA Plugin..."
+bashio::log.info "Starting Life Emotions AI..."
 bashio::log.info "Sync interval: ${SYNC_INTERVAL_MINUTES} minutes"
 bashio::log.info "Batch size: ${BATCH_SIZE}"
 

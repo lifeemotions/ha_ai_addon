@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Life Emotions HA Plugin
+Life Emotions AI
 
 Extracts historical device events from the local SQLite database
 and streams them to a remote Cloud API.
@@ -37,7 +37,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-logger = logging.getLogger("lifeemotions_ha_plugin")
+logger = logging.getLogger("lifeemotions_ai_addon")
 
 
 class DatabaseReader:
@@ -404,7 +404,7 @@ class EventExtractor:
 
     async def run(self) -> None:
         """Main run loop."""
-        logger.info("Life Emotions HA Plugin started")
+        logger.info("Life Emotions AI started")
         logger.info(f"Database path: {DATABASE_PATH}")
         logger.info(f"API endpoint: {API_ENDPOINT}")
         logger.info(f"Sync interval: {SYNC_INTERVAL_MINUTES} minutes")
@@ -525,7 +525,7 @@ def main() -> None:
         loop.run_until_complete(extractor.run())
     finally:
         loop.close()
-        logger.info("Life Emotions HA Plugin stopped")
+        logger.info("Life Emotions AI stopped")
 
 
 if __name__ == "__main__":

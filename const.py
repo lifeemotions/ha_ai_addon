@@ -1,9 +1,9 @@
-"""Configuration constants for Life Emotions HA Plugin."""
+"""Configuration constants for Life Emotions AI."""
 
 import logging
 import os
 
-logger = logging.getLogger("lifeemotions_ha_plugin")
+logger = logging.getLogger("lifeemotions_ai_addon")
 
 # Database configuration
 DATABASE_PATH = "/config/home-assistant_v2.db"
