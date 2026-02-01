@@ -24,6 +24,7 @@ from const import (
     CHECKPOINT_FILE,
     CLOUD_AUTH_TOKEN,
     DATABASE_PATH,
+    DEFAULT_API_ENDPOINT,
     MAX_RETRIES,
     ORIGIN,
     REQUEST_TIMEOUT_SECONDS,
@@ -79,38 +80,72 @@ class DatabaseReader:
 
     def __init__(self, db_path: str = DATABASE_PATH):
         self.db_path = db_path
+        self._has_event_types_table: Optional[bool] = None
 
     def _get_connection(self) -> sqlite3.Connection:
         """Create a read-only database connection."""
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=10)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _check_event_types_table(self, conn: sqlite3.Connection) -> bool:
+        """Check if the event_types table exists (HA 2023.4+ schema)."""
+        if self._has_event_types_table is None:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='event_types'"
+            )
+            self._has_event_types_table = cursor.fetchone() is not None
+            if self._has_event_types_table:
+                logger.info("Detected HA 2023.4+ schema (event_types table present)")
+            else:
+                logger.info("Using HA 2022.6+ schema (event_type column on events table)")
+        return self._has_event_types_table
 
     def fetch_events(self, last_event_id: int, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
         """
         Fetch events from the database starting after last_event_id.
 
-        Uses the newer HA database schema where event_data is in a separate table.
+        Supports both HA 2022.6+ schema (event_type on events table) and
+        HA 2023.4+ schema (event_type in separate event_types table).
         """
         events = []
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Query events with joined event_data (HA 2022.6+ schema)
-                query = """
-                    SELECT
-                        e.event_id,
-                        e.event_type,
-                        e.time_fired_ts,
-                        e.origin_idx,
-                        ed.shared_data as event_data
-                    FROM events e
-                    LEFT JOIN event_data ed ON e.data_id = ed.data_id
-                    WHERE e.event_id > ?
-                    ORDER BY e.event_id ASC
-                    LIMIT ?
-                """
+                if self._check_event_types_table(conn):
+                    # HA 2023.4+ schema: event_type in separate table
+                    query = """
+                        SELECT
+                            e.event_id,
+                            et.event_type,
+                            e.time_fired_ts,
+                            e.origin_idx,
+                            ed.shared_data as event_data
+                        FROM events e
+                        LEFT JOIN event_types et ON e.event_type_id = et.event_type_id
+                        LEFT JOIN event_data ed ON e.data_id = ed.data_id
+                        WHERE e.event_id > ?
+                        ORDER BY e.event_id ASC
+                        LIMIT ?
+                    """
+                else:
+                    # HA 2022.6+ schema: event_type directly on events table
+                    query = """
+                        SELECT
+                            e.event_id,
+                            e.event_type,
+                            e.time_fired_ts,
+                            e.origin_idx,
+                            ed.shared_data as event_data
+                        FROM events e
+                        LEFT JOIN event_data ed ON e.data_id = ed.data_id
+                        WHERE e.event_id > ?
+                        ORDER BY e.event_id ASC
+                        LIMIT ?
+                    """
+
                 cursor.execute(query, (last_event_id, batch_size))
                 rows = cursor.fetchall()
 
@@ -121,6 +156,11 @@ class DatabaseReader:
 
                 logger.info(f"Fetched {len(events)} events from database")
 
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() or "busy" in str(e).lower():
+                logger.warning(f"Database busy/locked fetching events (will retry next cycle): {e}")
+            else:
+                logger.error(f"Database error fetching events: {e}")
         except sqlite3.Error as e:
             logger.error(f"Database error fetching events: {e}")
 
@@ -163,6 +203,11 @@ class DatabaseReader:
 
                 logger.info(f"Fetched {len(states)} states from database")
 
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() or "busy" in str(e).lower():
+                logger.warning(f"Database busy/locked fetching states (will retry next cycle): {e}")
+            else:
+                logger.error(f"Database error fetching states: {e}")
         except sqlite3.Error as e:
             logger.error(f"Database error fetching states: {e}")
 
@@ -264,6 +309,10 @@ class CloudApiClient:
             logger.error("No authentication token configured. Skipping API call.")
             return False
 
+        if self.api_endpoint == DEFAULT_API_ENDPOINT:
+            logger.error("API endpoint is still the default placeholder. Configure a real endpoint.")
+            return False
+
         headers = {
             "Authorization": f"Bearer {self.auth_token}",
             "Content-Type": "application/json",
@@ -332,6 +381,9 @@ class EventExtractor:
         logger.info(f"Batch size: {BATCH_SIZE}")
         token_status = f"***{CLOUD_AUTH_TOKEN[-4:]}" if len(CLOUD_AUTH_TOKEN) > 4 else ("set (short)" if CLOUD_AUTH_TOKEN else "NOT SET")
         logger.info(f"Auth token: {token_status}")
+
+        if API_ENDPOINT == DEFAULT_API_ENDPOINT:
+            logger.warning("API endpoint is the default placeholder — data will NOT be sent until configured")
 
         # Validate database exists
         if not Path(DATABASE_PATH).exists():

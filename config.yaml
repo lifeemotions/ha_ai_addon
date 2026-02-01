@@ -13,7 +13,10 @@ arch:
   - armhf
   - i386
 
-# Map the config directory to access the database
+# Map the config directory to access the database (read-only).
+# Note: homeassistant_api is not declared because this add-on reads the
+# SQLite database directly. Add "homeassistant_api: true" here if HA REST
+# API access is ever needed.
 map:
   - config:ro
 
