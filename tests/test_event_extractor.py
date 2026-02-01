@@ -204,7 +204,6 @@ class TestRun:
 
         with patch("main.Path") as mock_path, \
              patch("main.DATABASE_PATH", "/nonexistent/db"), \
-             patch("main.API_ENDPOINT", "https://real.api.com/ingest"), \
              patch("main.CLOUD_AUTH_TOKEN", "token123456"):
             mock_path.return_value.exists.return_value = False
             await extractor.run()
@@ -230,7 +229,6 @@ class TestRun:
 
         with patch("main.Path") as mock_path, \
              patch("main.DATABASE_PATH", "/fake/db"), \
-             patch("main.API_ENDPOINT", "https://real.api.com/ingest"), \
              patch("main.CLOUD_AUTH_TOKEN", "token123456"):
             mock_path.return_value.exists.return_value = True
             await extractor.run()
@@ -259,7 +257,6 @@ class TestRun:
 
         with patch("main.Path") as mock_path, \
              patch("main.DATABASE_PATH", "/fake/db"), \
-             patch("main.API_ENDPOINT", "https://real.api.com/ingest"), \
              patch("main.CLOUD_AUTH_TOKEN", "token123456"), \
              patch("main.asyncio.sleep", new_callable=AsyncMock):
             mock_path.return_value.exists.return_value = True

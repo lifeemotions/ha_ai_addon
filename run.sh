@@ -7,7 +7,6 @@
 # Read configuration from add-on options
 export CLOUD_AUTH_TOKEN=$(bashio::config 'cloud_auth_token')
 export SYNC_INTERVAL_MINUTES=$(bashio::config 'sync_interval_minutes')
-export API_ENDPOINT=$(bashio::config 'api_endpoint')
 export BATCH_SIZE=$(bashio::config 'batch_size')
 
 bashio::log.info "Starting Life Emotions AI..."

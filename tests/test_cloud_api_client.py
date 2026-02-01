@@ -136,17 +136,6 @@ class TestSendBatch:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_default_endpoint_returns_false(self):
-        from const import DEFAULT_API_ENDPOINT
-        client = CloudApiClient(
-            api_endpoint=DEFAULT_API_ENDPOINT,
-            auth_token="token",
-        )
-        records = [{"id": 1, "type": "event"}]
-        result = await client.send_batch(records)
-        assert result is False
-
-    @pytest.mark.asyncio
     async def test_successful_send_200(self, sample_event_records):
         client = CloudApiClient(
             api_endpoint="https://api.test.com/ingest",
@@ -338,16 +327,6 @@ class TestFetchCheckpoint:
         client = CloudApiClient(
             api_endpoint="https://api.test.com/ingest",
             auth_token="",
-        )
-        result = await client.fetch_checkpoint()
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_default_endpoint_returns_none(self):
-        from const import DEFAULT_API_ENDPOINT
-        client = CloudApiClient(
-            api_endpoint=DEFAULT_API_ENDPOINT,
-            auth_token="token",
         )
         result = await client.fetch_checkpoint()
         assert result is None

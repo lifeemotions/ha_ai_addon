@@ -9,8 +9,7 @@ logger = logging.getLogger("lifeemotions_ai_addon")
 DATABASE_PATH = "/config/home-assistant_v2.db"
 
 # API configuration
-DEFAULT_API_ENDPOINT = "https://api.example-cloud.com/v1/ingest"
-API_ENDPOINT = os.environ.get("API_ENDPOINT", DEFAULT_API_ENDPOINT)
+API_ENDPOINT = "https://api.life-emotions.com/ha/data"
 CLOUD_AUTH_TOKEN = os.environ.get("CLOUD_AUTH_TOKEN", "")
 
 

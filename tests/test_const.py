@@ -67,9 +67,9 @@ class TestParseIntEnv:
 class TestConstantsDefaults:
     """Tests for default constant values."""
 
-    def test_default_api_endpoint(self):
-        from const import DEFAULT_API_ENDPOINT
-        assert DEFAULT_API_ENDPOINT == "https://api.example-cloud.com/v1/ingest"
+    def test_api_endpoint(self):
+        from const import API_ENDPOINT
+        assert API_ENDPOINT == "https://api.life-emotions.com/ha/data"
 
     def test_default_sync_interval(self):
         from const import DEFAULT_SYNC_INTERVAL_MINUTES

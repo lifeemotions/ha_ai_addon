@@ -7,7 +7,9 @@
       "Bash(pip3 install:*)",
       "Bash(source:*)",
       "Bash(PYTHONPATH=. python -m pytest:*)",
-      "Bash(PYTHONPATH=. .venv/bin/python -m pytest:*)"
+      "Bash(PYTHONPATH=. .venv/bin/python -m pytest:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(ls:*)"
     ]
   }
 }

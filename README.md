@@ -18,19 +18,17 @@ This Home Assistant Add-on extracts historical device events and state changes f
 
 ## Configuration
 
-| Option                  | Type   | Default                                   | Description                             |
-| ----------------------- | ------ | ----------------------------------------- | --------------------------------------- |
-| `cloud_auth_token`      | string | `""`                                      | Bearer token for API authentication     |
-| `sync_interval_minutes` | int    | `5`                                       | How often to sync data (1-1440 minutes) |
-| `api_endpoint`          | url    | `https://api.example-cloud.com/v1/ingest` | Cloud API endpoint URL                  |
-| `batch_size`            | int    | `100`                                     | Number of records per batch (10-1000)   |
+| Option                  | Type   | Default | Description                             |
+| ----------------------- | ------ | ------- | --------------------------------------- |
+| `cloud_auth_token`      | string | `""`    | Bearer token for API authentication     |
+| `sync_interval_minutes` | int    | `5`     | How often to sync data (1-1440 minutes) |
+| `batch_size`            | int    | `100`   | Number of records per batch (10-1000)   |
 
 ### Example Configuration
 
 ```yaml
 cloud_auth_token: "your-secret-token-here"
 sync_interval_minutes: 5
-api_endpoint: "https://api.your-cloud.com/v1/ingest"
 batch_size: 100
 ```
 
@@ -115,7 +113,6 @@ Settings → Add-ons → HA Event Extractor → Logs
 # Set environment variables
 export CLOUD_AUTH_TOKEN="test-token"
 export SYNC_INTERVAL_MINUTES=1
-export API_ENDPOINT="http://localhost:8080/ingest"
 export BATCH_SIZE=10
 
 # Run the script

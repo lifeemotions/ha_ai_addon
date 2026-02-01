@@ -23,7 +23,6 @@ from const import (
     BATCH_SIZE,
     CLOUD_AUTH_TOKEN,
     DATABASE_PATH,
-    DEFAULT_API_ENDPOINT,
     MAX_RETRIES,
     ORIGIN,
     REQUEST_TIMEOUT_SECONDS,
@@ -272,10 +271,6 @@ class CloudApiClient:
             logger.error("No authentication token configured. Cannot fetch checkpoint.")
             return None
 
-        if self.api_endpoint == DEFAULT_API_ENDPOINT:
-            logger.error("API endpoint is still the default placeholder. Configure a real endpoint.")
-            return None
-
         headers = {
             "Authorization": f"Bearer {self.auth_token}",
         }
@@ -338,10 +333,6 @@ class CloudApiClient:
 
         if not self.auth_token:
             logger.error("No authentication token configured. Skipping API call.")
-            return False
-
-        if self.api_endpoint == DEFAULT_API_ENDPOINT:
-            logger.error("API endpoint is still the default placeholder. Configure a real endpoint.")
             return False
 
         headers = {
@@ -411,9 +402,6 @@ class EventExtractor:
         logger.info(f"Batch size: {BATCH_SIZE}")
         token_status = f"***{CLOUD_AUTH_TOKEN[-4:]}" if len(CLOUD_AUTH_TOKEN) > 4 else ("set (short)" if CLOUD_AUTH_TOKEN else "NOT SET")
         logger.info(f"Auth token: {token_status}")
-
-        if API_ENDPOINT == DEFAULT_API_ENDPOINT:
-            logger.warning("API endpoint is the default placeholder — data will NOT be sent until configured")
 
         # Validate database exists
         if not Path(DATABASE_PATH).exists():
