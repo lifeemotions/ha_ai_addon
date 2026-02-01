@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 import aiohttp
 
+from ha_api import check_recorder_dialect
 from const import (
     API_ENDPOINT,
     BATCH_SIZE,
@@ -403,10 +404,21 @@ class EventExtractor:
         token_status = f"***{CLOUD_AUTH_TOKEN[-4:]}" if len(CLOUD_AUTH_TOKEN) > 4 else ("set (short)" if CLOUD_AUTH_TOKEN else "NOT SET")
         logger.info(f"Auth token: {token_status}")
 
+        # Verify Recorder is using SQLite
+        dialect = await check_recorder_dialect()
+        if dialect is not None and dialect != "sqlite":
+            logger.error(
+                f"Home Assistant Recorder is using '{dialect}', but this add-on requires SQLite. "
+                "Please configure the Recorder integration to use the default SQLite database."
+            )
+            return
+        if dialect is None:
+            logger.warning("Could not verify Recorder database type, proceeding with file check")
+
         # Validate database exists
         if not Path(DATABASE_PATH).exists():
             logger.error(f"Database not found at {DATABASE_PATH}")
-            logger.error("Make sure the add-on has access to the config directory")
+            logger.error("Recorder may not be using SQLite, or the database has not been created yet")
             return
 
         try:

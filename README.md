@@ -81,10 +81,16 @@ Settings → Add-ons → HA Event Extractor → Logs
 
 ## Troubleshooting
 
+### "Recorder is using '{dialect}'" error
+
+- The add-on automatically detects the Recorder's database engine at startup
+- This add-on only supports SQLite (the default Home Assistant database)
+- If you are using MariaDB or PostgreSQL, switch the Recorder back to SQLite
+
 ### "Database not found" error
 
-- Ensure the add-on has `map: config:ro` in the configuration
-- Verify Home Assistant Recorder is enabled and using SQLite
+- The Recorder may not be using SQLite, or the database has not been created yet
+- Verify Home Assistant Recorder is enabled and using the default SQLite database
 
 ### "No authentication token configured" error
 
