@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Home Assistant Event Extractor
+Life Emotions HA Plugin
 
 Extracts historical device events from the local SQLite database
 and streams them to a remote Cloud API.
@@ -36,7 +36,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-logger = logging.getLogger("ha_event_extractor")
+logger = logging.getLogger("lifeemotions_ha_plugin")
 
 
 class CheckpointManager:
@@ -312,7 +312,7 @@ class EventExtractor:
 
     async def run(self) -> None:
         """Main run loop."""
-        logger.info("HA Event Extractor started")
+        logger.info("Life Emotions HA Plugin started")
         logger.info(f"Database path: {DATABASE_PATH}")
         logger.info(f"API endpoint: {API_ENDPOINT}")
         logger.info(f"Sync interval: {SYNC_INTERVAL_MINUTES} minutes")
@@ -411,7 +411,7 @@ def main() -> None:
     try:
         asyncio.run(extractor.run())
     except KeyboardInterrupt:
-        logger.info("Shutting down HA Event Extractor...")
+        logger.info("Shutting down Life Emotions HA Plugin...")
         extractor.running = False
 
 

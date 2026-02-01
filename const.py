@@ -1,4 +1,4 @@
-"""Configuration constants for HA Event Extractor."""
+"""Configuration constants for Life Emotions HA Plugin."""
 
 import os
 

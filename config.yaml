@@ -1,9 +1,9 @@
 # Home Assistant Add-on Configuration
-name: "HA Event Extractor"
+name: "Life Emotions HA Plugin"
 version: "1.0.0"
-slug: "ha_event_extractor"
-description: "Extracts historical device events from Home Assistant and streams them to a remote Cloud API"
-url: "https://github.com/example/ha-event-extractor"
+slug: "lifeemotions_ha_plugin"
+description: "Extracts historical device events from Home Assistant, streams them to a remote Cloud API and manages a local AI model"
+url: "https://github.com/lifeemotions/lifeemotions-ha-plugin"
 
 # Supported architectures
 arch:
