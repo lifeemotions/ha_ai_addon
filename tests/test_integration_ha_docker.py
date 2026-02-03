@@ -139,7 +139,8 @@ def simulate_ha_activity(ha_base_url, ha_access_token):
         )
 
     # Give the Recorder time to flush to SQLite
-    time.sleep(3)
+    # The Recorder commits in batches, so we need to wait longer
+    time.sleep(10)
 
     return SIMULATED_ENTITIES
 

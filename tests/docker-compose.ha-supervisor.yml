@@ -1,0 +1,103 @@
+services:
+  homeassistant-supervisor:
+    image: ghcr.io/home-assistant/devcontainer:2-addons
+    privileged: true
+    ports:
+      - "8123:8123"
+    volumes:
+      # Required for Docker-in-Docker
+      - hass_docker_data:/var/lib/docker
+      # Supervisor data directory
+      - hass_supervisor_data:/mnt/supervisor
+      # Mount our add-on source code as a local add-on
+      - ../:/mnt/supervisor/addons/local/lifeemotions_ai_addon:ro
+    environment:
+      - WORKSPACE_DIRECTORY=/mnt/supervisor/addons/local/lifeemotions_ai_addon
+    # Keep container running and start supervisor
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        # Start systemd services and Docker manually
+        echo "Starting systemd-journald..."
+        mkdir -p /var/log/journal
+        sudo systemd-tmpfiles --create --prefix /var/log/journal 2>/dev/null || true
+        sudo /usr/lib/systemd/systemd-journald &
+        sudo /usr/lib/systemd/systemd-journal-gatewayd --system 2>/dev/null &
+
+        # Use Docker Desktop's DNS resolver (192.168.65.7) for nested containers
+        # This resolves the issue with nested Docker networking on macOS
+        echo "Starting Docker with DNS configuration..."
+        sudo dockerd --storage-driver=overlay2 --dns 192.168.65.7 > /var/log/dockerd.log 2>&1 &
+
+        echo "Waiting for Docker to start..."
+        timeout=60
+        while [ ! -S /var/run/docker.sock ] && [ $$timeout -gt 0 ]; do
+          sleep 1
+          timeout=$$((timeout-1))
+        done
+
+        if [ ! -S /var/run/docker.sock ]; then
+          echo "Docker failed to start"
+          cat /var/log/dockerd.log
+          exit 1
+        fi
+        echo "Docker is ready"
+
+        # Get supervisor info
+        VERSION_INFO=$$(curl -s https://version.home-assistant.io/dev.json)
+        HA_ARCH=$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/aarch64/')
+        SUPERVISOR_VERSION=$$(echo $$VERSION_INFO | jq -r '.supervisor')
+        SUPERVISOR_IMAGE=$$(echo $$VERSION_INFO | jq -r '.images.supervisor' | sed "s/{arch}/$$HA_ARCH/")
+
+        echo "Pulling Supervisor image: $$SUPERVISOR_IMAGE:$$SUPERVISOR_VERSION"
+        docker pull "$$SUPERVISOR_IMAGE:$$SUPERVISOR_VERSION"
+
+        # Initialize dbus
+        echo "Starting D-Bus..."
+        mkdir -p /var/lib/dbus /run/dbus
+        cp -f /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+        rm -f /run/dbus/pid
+        dbus-daemon --system --print-address || true
+
+        # Initialize udev
+        echo "Starting udev..."
+        mkdir -p /run/udev
+        /lib/systemd/systemd-udevd --daemon || true
+        sleep 2
+        udevadm trigger 2>/dev/null || true
+        udevadm settle 2>/dev/null || true
+
+        # Start os-agent
+        os-agent &
+
+        echo "Starting Supervisor..."
+        docker run -d --name hassio_supervisor \
+          --privileged \
+          --security-opt seccomp=unconfined \
+          --security-opt apparmor=unconfined \
+          --dns 192.168.65.7 \
+          -v /run/docker.sock:/run/docker.sock:rw \
+          -v /run/dbus:/run/dbus:ro \
+          -v /run/udev:/run/udev:ro \
+          -v /mnt/supervisor:/data:rw \
+          -v /etc/machine-id:/etc/machine-id:ro \
+          -e SUPERVISOR_SHARE="/mnt/supervisor" \
+          -e SUPERVISOR_NAME=hassio_supervisor \
+          -e SUPERVISOR_DEV=1 \
+          -e SUPERVISOR_MACHINE="$$(uname -m | sed 's/x86_64/qemux86-64/;s/aarch64/qemuarm-64/')" \
+          "$$SUPERVISOR_IMAGE:$$SUPERVISOR_VERSION"
+
+        echo "Supervisor started. Waiting for it to initialize..."
+        sleep 10
+
+        echo "Supervisor container logs:"
+        docker logs hassio_supervisor 2>&1 | tail -50
+
+        # Keep container running
+        echo "Container ready. Keeping alive..."
+        tail -f /dev/null
+
+volumes:
+  hass_docker_data:
+  hass_supervisor_data:

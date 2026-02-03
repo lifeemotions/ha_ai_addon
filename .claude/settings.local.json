@@ -10,7 +10,18 @@
       "Bash(PYTHONPATH=. .venv/bin/python -m pytest:*)",
       "Bash(python -m pytest:*)",
       "Bash(ls:*)",
-      "Bash(.venv/bin/python -m pytest:*)"
+      "Bash(.venv/bin/python -m pytest:*)",
+      "WebFetch(domain:developers.home-assistant.io)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(.venv/bin/pip list:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker manifest inspect:*)",
+      "Bash(docker logs:*)",
+      "Bash(docker exec tests-homeassistant-supervisor-1 docker ps)",
+      "Bash(docker exec:*)",
+      "Bash(docker run:*)",
+      "WebFetch(domain:version.home-assistant.io)",
+      "Bash(./scripts/run_tests.sh:*)"
     ]
   }
 }

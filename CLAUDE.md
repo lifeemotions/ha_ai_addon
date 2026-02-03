@@ -86,36 +86,65 @@ WHERE s.last_updated_ts > ?
 
 ## Running Tests
 
-### Unit Tests (fast, no Docker)
+Use the test runner script for convenience:
+
 ```bash
-.venv/bin/python -m pytest tests/ -v --ignore=tests/test_integration_ha_docker.py
+./scripts/run_tests.sh          # Run all tests (106 total)
+./scripts/run_tests.sh unit     # Run only unit tests (94 tests, fast)
+./scripts/run_tests.sh ha       # Run only HA Docker integration tests (3 tests)
+./scripts/run_tests.sh addon    # Run only add-on installation tests (9 tests, ~3 min)
+./scripts/run_tests.sh fast     # Run unit + HA Docker tests (skip slow addon tests)
 ```
 
-### Integration Tests (requires Docker)
+Or run directly with pytest:
+
+### Unit Tests (94 tests, fast, no Docker)
+```bash
+.venv/bin/python -m pytest tests/ -v \
+    --ignore=tests/test_integration_addon_install.py \
+    --ignore=tests/test_integration_ha_docker.py
+```
+
+### HA Docker Integration Tests (3 tests)
 ```bash
 .venv/bin/python -m pytest tests/test_integration_ha_docker.py -v
 ```
 
-Integration tests:
-- Start a real HA container via `pytest-docker`
+These tests:
+- Start a real HA Core container via `pytest-docker`
 - Complete onboarding programmatically (`POST /api/onboarding/users` → `POST /auth/token`)
 - Simulate activity via REST API (`POST /api/states/<entity_id>`)
 - Copy the SQLite DB out of the container (including WAL files)
 - Run `DatabaseReader` against the real DB
 
+### Add-on Installation Integration Tests (9 tests, ~3 min)
+```bash
+.venv/bin/python -m pytest tests/test_integration_addon_install.py -v
+```
+
+These tests:
+- Start a full HA Supervisor environment (Docker-in-Docker)
+- Verify the add-on appears in the local add-on store
+- Install the add-on via Supervisor CLI
+- Verify configuration options and HA version requirements
+
+**Note**: Integration tests must be run separately because they use different docker-compose files. Running them together in a single pytest session will cause fixture conflicts.
+
 ### Test Structure
 
-| Test File | Coverage |
-|-----------|----------|
-| `test_database_reader.py` | `DatabaseReader` fetch/parse methods |
-| `test_cloud_api_client.py` | `CloudApiClient` send/checkpoint with retry logic |
-| `test_event_extractor.py` | `EventExtractor` sync cycle orchestration |
-| `test_const.py` | Environment variable parsing |
-| `test_integration_ha_docker.py` | End-to-end with real HA container |
+| Test File | Tests | Coverage |
+|-----------|-------|----------|
+| `test_database_reader.py` | 30 | `DatabaseReader` fetch/parse methods |
+| `test_cloud_api_client.py` | 30 | `CloudApiClient` send/checkpoint with retry logic |
+| `test_event_extractor.py` | 18 | `EventExtractor` sync cycle orchestration |
+| `test_const.py` | 16 | Environment variable parsing |
+| `test_integration_ha_docker.py` | 3 | End-to-end with real HA Core container |
+| `test_integration_addon_install.py` | 9 | Add-on installation into HA Supervisor |
 
-- Test framework: pytest with pytest-asyncio
+- Test framework: pytest with pytest-asyncio, pytest-docker
 - Config: `pytest.ini` (asyncio_mode=auto)
 - Integration tests marked with `@pytest.mark.integration`
+- Slow tests marked with `@pytest.mark.slow`
 
 ## Bug Fixing Workflow
 
