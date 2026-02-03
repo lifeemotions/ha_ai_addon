@@ -9,7 +9,8 @@
       "Bash(PYTHONPATH=. python -m pytest:*)",
       "Bash(PYTHONPATH=. .venv/bin/python -m pytest:*)",
       "Bash(python -m pytest:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(.venv/bin/python -m pytest:*)"
     ]
   }
 }
