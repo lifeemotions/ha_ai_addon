@@ -5,6 +5,9 @@ slug: "lifeemotions_ai_addon"
 description: "Extracts historical device events from Home Assistant, streams them to a remote Cloud API and manages a local AI model"
 url: "https://github.com/lifeemotions/ha_ai_addon"
 
+# Minimum Home Assistant version (requires 2023.4+ database schema)
+homeassistant: "2023.4.0"
+
 # Supported architectures
 arch:
   - amd64

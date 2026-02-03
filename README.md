@@ -2,6 +2,8 @@
 
 This Home Assistant Add-on extracts historical device events and state changes from the local SQLite database and streams them to a remote Cloud API.
 
+> **Requires Home Assistant 2023.4 or later.** This add-on only supports the modern database schema introduced in HA 2023.4, where event types are stored in a separate `event_types` table and `state_changed` events are no longer recorded in the `events` table. The add-on will not install on older HA versions.
+
 ## Features
 
 - **Database Access**: Reads from the Home Assistant SQLite database (`/config/home-assistant_v2.db`)
@@ -34,14 +36,18 @@ batch_size: 100
 
 ## Data Schema
 
-The add-on sends data to the Cloud API in the following JSON format:
+The add-on sends two types of records to the Cloud API: **states** (entity state changes) and **events** (system/automation events).
+
+> **Note:** Since HA 2023.4+, `state_changed` events are no longer recorded in the events table. State changes are only stored in the states table. The events table contains system events like `homeassistant_start`, `automation_triggered`, `call_service`, etc.
+
+### State record (entity state changes)
 
 ```json
 {
   "records": [
     {
-      "id": 12345,
-      "type": "event|state",
+      "id": 1,
+      "type": "state",
       "timestamp": "2025-12-19T10:30:00.000000Z",
       "raw_timestamp": 1734605400.0,
       "entity_id": "light.living_room",
@@ -50,6 +56,30 @@ The add-on sends data to the Cloud API in the following JSON format:
       "attributes": {
         "brightness": 255,
         "friendly_name": "Living Room Light"
+      },
+      "origin": "local"
+    }
+  ],
+  "source": "home_assistant",
+  "sent_at": "2025-12-19T10:30:05.000000Z"
+}
+```
+
+### Event record (system/automation events)
+
+```json
+{
+  "records": [
+    {
+      "id": 1,
+      "type": "event",
+      "timestamp": "2025-12-19T10:30:00.000000Z",
+      "raw_timestamp": 1734605400.0,
+      "entity_id": "",
+      "event_type": "automation_triggered",
+      "state": null,
+      "attributes": {
+        "entity_id": "automation.morning"
       },
       "origin": "local"
     }

@@ -41,11 +41,14 @@ logger = logging.getLogger("lifeemotions_ai_addon")
 
 
 class DatabaseReader:
-    """Reads events and states from the Home Assistant SQLite database."""
+    """Reads events and states from the Home Assistant SQLite database.
+
+    Requires HA 2023.4+ database schema (event_types in separate table,
+    state_changed events no longer recorded in events table).
+    """
 
     def __init__(self, db_path: str = DATABASE_PATH):
         self.db_path = db_path
-        self._has_event_types_table: Optional[bool] = None
 
     def _get_connection(self) -> sqlite3.Connection:
         """Create a read-only database connection."""
@@ -53,63 +56,33 @@ class DatabaseReader:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _check_event_types_table(self, conn: sqlite3.Connection) -> bool:
-        """Check if the event_types table exists (HA 2023.4+ schema)."""
-        if self._has_event_types_table is None:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='event_types'"
-            )
-            self._has_event_types_table = cursor.fetchone() is not None
-            if self._has_event_types_table:
-                logger.info("Detected HA 2023.4+ schema (event_types table present)")
-            else:
-                logger.info("Using HA 2022.6+ schema (event_type column on events table)")
-        return self._has_event_types_table
-
     def fetch_events(self, after_timestamp: float, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
         """
         Fetch events from the database with time_fired_ts > after_timestamp.
 
-        Supports both HA 2022.6+ schema (event_type on events table) and
-        HA 2023.4+ schema (event_type in separate event_types table).
+        Uses HA 2023.4+ schema where event_type is in a separate event_types table.
+        Note: state_changed events are no longer recorded here; state changes
+        are only in the states table.
         """
         events = []
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
-                if self._check_event_types_table(conn):
-                    # HA 2023.4+ schema: event_type in separate table
-                    query = """
-                        SELECT
-                            e.event_id,
-                            et.event_type,
-                            e.time_fired_ts,
-                            e.origin_idx,
-                            ed.shared_data as event_data
-                        FROM events e
-                        LEFT JOIN event_types et ON e.event_type_id = et.event_type_id
-                        LEFT JOIN event_data ed ON e.data_id = ed.data_id
-                        WHERE e.time_fired_ts > ?
-                        ORDER BY e.time_fired_ts ASC
-                        LIMIT ?
-                    """
-                else:
-                    # HA 2022.6+ schema: event_type directly on events table
-                    query = """
-                        SELECT
-                            e.event_id,
-                            e.event_type,
-                            e.time_fired_ts,
-                            e.origin_idx,
-                            ed.shared_data as event_data
-                        FROM events e
-                        LEFT JOIN event_data ed ON e.data_id = ed.data_id
-                        WHERE e.time_fired_ts > ?
-                        ORDER BY e.time_fired_ts ASC
-                        LIMIT ?
-                    """
+                query = """
+                    SELECT
+                        e.event_id,
+                        et.event_type,
+                        e.time_fired_ts,
+                        e.origin_idx,
+                        ed.shared_data as event_data
+                    FROM events e
+                    LEFT JOIN event_types et ON e.event_type_id = et.event_type_id
+                    LEFT JOIN event_data ed ON e.data_id = ed.data_id
+                    WHERE e.time_fired_ts > ?
+                    ORDER BY e.time_fired_ts ASC
+                    LIMIT ?
+                """
 
                 cursor.execute(query, (after_timestamp, batch_size))
                 rows = cursor.fetchall()

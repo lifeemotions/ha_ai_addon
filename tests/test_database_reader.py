@@ -15,11 +15,6 @@ class TestDatabaseReaderInit:
         reader = DatabaseReader(db_path=ha_db)
         assert reader.db_path == ha_db
 
-    def test_event_types_table_initially_none(self, ha_db):
-        reader = DatabaseReader(db_path=ha_db)
-        assert reader._has_event_types_table is None
-
-
 class TestDatabaseReaderConnection:
     """Tests for DatabaseReader._get_connection()."""
 
@@ -46,31 +41,6 @@ class TestDatabaseReaderConnection:
         reader = DatabaseReader(db_path=str(tmp_path / "nonexistent.db"))
         with pytest.raises(sqlite3.OperationalError):
             reader._get_connection()
-
-
-class TestCheckEventTypesTable:
-    """Tests for DatabaseReader._check_event_types_table()."""
-
-    def test_detects_new_schema(self, ha_db):
-        reader = DatabaseReader(db_path=ha_db)
-        conn = reader._get_connection()
-        assert reader._check_event_types_table(conn) is True
-        conn.close()
-
-    def test_detects_old_schema(self, ha_db_old_schema):
-        reader = DatabaseReader(db_path=ha_db_old_schema)
-        conn = reader._get_connection()
-        assert reader._check_event_types_table(conn) is False
-        conn.close()
-
-    def test_caches_result(self, ha_db):
-        reader = DatabaseReader(db_path=ha_db)
-        conn = reader._get_connection()
-        reader._check_event_types_table(conn)
-        assert reader._has_event_types_table is True
-        reader._check_event_types_table(conn)
-        assert reader._has_event_types_table is True
-        conn.close()
 
 
 class TestFetchEvents:
@@ -110,8 +80,8 @@ class TestFetchEvents:
         events = reader.fetch_events(after_timestamp=0.0, batch_size=1)
         event = events[0]
         assert event["type"] == "event"
-        assert event["event_type"] == "state_changed"
-        assert event["entity_id"] == "light.living_room"
+        assert event["event_type"] == "homeassistant_start"
+        assert event["entity_id"] == ""
         assert event["origin"] == "local"
         assert event["state"] is None
         assert "timestamp" in event
@@ -124,14 +94,8 @@ class TestFetchEvents:
         reader = DatabaseReader(db_path=ha_db)
         events = reader.fetch_events(after_timestamp=1705320060.0, batch_size=1)
         assert len(events) == 1
+        assert events[0]["event_type"] == "call_service"
         assert events[0]["attributes"] == {}
-
-    def test_fetches_events_old_schema(self, ha_db_old_schema):
-        reader = DatabaseReader(db_path=ha_db_old_schema)
-        events = reader.fetch_events(after_timestamp=0.0)
-        assert len(events) == 1
-        assert events[0]["event_type"] == "state_changed"
-        assert events[0]["raw_timestamp"] == 1705320000.0
 
     def test_returns_empty_on_db_error(self, tmp_path):
         reader = DatabaseReader(db_path=str(tmp_path / "nonexistent.db"))
@@ -247,7 +211,6 @@ class TestParseEventRow:
         reader = DatabaseReader(db_path=ha_db)
         conn = reader._get_connection()
         cursor = conn.cursor()
-        reader._check_event_types_table(conn)
         cursor.execute("""
             SELECT e.event_id, et.event_type, e.time_fired_ts, e.origin_idx,
                    ed.shared_data as event_data
@@ -261,7 +224,7 @@ class TestParseEventRow:
         assert result is not None
         assert result["id"] == 1
         assert result["type"] == "event"
-        assert result["event_type"] == "state_changed"
+        assert result["event_type"] == "homeassistant_start"
         assert result["raw_timestamp"] == 1705320000.0
         conn.close()
 

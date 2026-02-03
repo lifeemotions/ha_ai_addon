@@ -67,14 +67,20 @@ def ha_db(tmp_path):
     """)
 
     # Insert test event data
+    # Modern HA (2023.4+) no longer records state_changed in the events table.
+    # State changes only go to the states table. The events table contains
+    # system events like homeassistant_start, automation_triggered, call_service, etc.
     cursor.execute(
-        "INSERT INTO event_types (event_type_id, event_type) VALUES (1, 'state_changed')"
+        "INSERT INTO event_types (event_type_id, event_type) VALUES (1, 'homeassistant_start')"
     )
     cursor.execute(
         "INSERT INTO event_types (event_type_id, event_type) VALUES (2, 'automation_triggered')"
     )
     cursor.execute(
-        'INSERT INTO event_data (data_id, shared_data) VALUES (1, \'{"entity_id": "light.living_room", "old_state": "off", "new_state": "on"}\')'
+        "INSERT INTO event_types (event_type_id, event_type) VALUES (3, 'call_service')"
+    )
+    cursor.execute(
+        'INSERT INTO event_data (data_id, shared_data) VALUES (1, \'{}\')'
     )
     cursor.execute(
         'INSERT INTO event_data (data_id, shared_data) VALUES (2, \'{"entity_id": "automation.morning"}\')'
@@ -82,9 +88,9 @@ def ha_db(tmp_path):
     cursor.execute("INSERT INTO event_data (data_id, shared_data) VALUES (3, 'invalid json{{')")
 
     # Events: time_fired_ts is Unix timestamp
-    # Event 1: 1705320000.0 (2024-01-15 12:00:00 UTC)
-    # Event 2: 1705320060.0 (2024-01-15 12:01:00 UTC)
-    # Event 3: 1705320120.0 (2024-01-15 12:02:00 UTC)
+    # Event 1: 1705320000.0 (2024-01-15 12:00:00 UTC) - homeassistant_start
+    # Event 2: 1705320060.0 (2024-01-15 12:01:00 UTC) - automation_triggered
+    # Event 3: 1705320120.0 (2024-01-15 12:02:00 UTC) - call_service (invalid json data)
     cursor.execute(
         "INSERT INTO events (event_id, event_type_id, time_fired_ts, origin_idx, data_id) "
         "VALUES (1, 1, 1705320000.0, 0, 1)"
@@ -95,7 +101,7 @@ def ha_db(tmp_path):
     )
     cursor.execute(
         "INSERT INTO events (event_id, event_type_id, time_fired_ts, origin_idx, data_id) "
-        "VALUES (3, 1, 1705320120.0, 0, 3)"
+        "VALUES (3, 3, 1705320120.0, 0, 3)"
     )
 
     # Insert test state data
@@ -132,84 +138,22 @@ def ha_db(tmp_path):
 
 
 @pytest.fixture
-def ha_db_old_schema(tmp_path):
-    """Create a temporary HA database with the older 2022.6+ schema (no event_types table)."""
-    db_path = str(tmp_path / "home-assistant_v2.db")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    cursor.executescript("""
-        CREATE TABLE event_data (
-            data_id INTEGER PRIMARY KEY,
-            shared_data TEXT
-        );
-
-        CREATE TABLE events (
-            event_id INTEGER PRIMARY KEY,
-            event_type TEXT,
-            time_fired_ts REAL,
-            origin_idx INTEGER,
-            data_id INTEGER,
-            FOREIGN KEY (data_id) REFERENCES event_data(data_id)
-        );
-
-        CREATE TABLE states_meta (
-            metadata_id INTEGER PRIMARY KEY,
-            entity_id TEXT NOT NULL
-        );
-
-        CREATE TABLE state_attributes (
-            attributes_id INTEGER PRIMARY KEY,
-            shared_attrs TEXT
-        );
-
-        CREATE TABLE states (
-            state_id INTEGER PRIMARY KEY,
-            metadata_id INTEGER,
-            state TEXT,
-            last_updated_ts REAL,
-            last_changed_ts REAL,
-            attributes_id INTEGER
-        );
-    """)
-
-    cursor.execute(
-        'INSERT INTO event_data (data_id, shared_data) VALUES (1, \'{"entity_id": "switch.garage"}\')'
-    )
-    cursor.execute(
-        "INSERT INTO events (event_id, event_type, time_fired_ts, origin_idx, data_id) "
-        "VALUES (1, 'state_changed', 1705320000.0, 0, 1)"
-    )
-
-    cursor.execute(
-        "INSERT INTO states_meta (metadata_id, entity_id) VALUES (1, 'switch.garage')"
-    )
-    cursor.execute(
-        'INSERT INTO state_attributes (attributes_id, shared_attrs) VALUES (1, \'{"friendly_name": "Garage"}\')'
-    )
-    cursor.execute(
-        "INSERT INTO states (state_id, metadata_id, state, last_updated_ts, last_changed_ts, attributes_id) "
-        "VALUES (1, 1, 'off', 1705320000.0, 1705320000.0, 1)"
-    )
-
-    conn.commit()
-    conn.close()
-    return db_path
-
-
-@pytest.fixture
 def sample_event_records():
-    """Sample event records as returned by DatabaseReader."""
+    """Sample event records as returned by DatabaseReader.
+
+    Modern HA (2023.4+) no longer records state_changed in the events table.
+    Events contain system/automation events only.
+    """
     return [
         {
             "id": 1,
             "type": "event",
             "timestamp": "2024-01-15T12:00:00+00:00",
             "raw_timestamp": 1705320000.0,
-            "entity_id": "light.living_room",
-            "event_type": "state_changed",
+            "entity_id": "",
+            "event_type": "homeassistant_start",
             "state": None,
-            "attributes": {"entity_id": "light.living_room", "old_state": "off", "new_state": "on"},
+            "attributes": {},
             "origin": "local",
         },
         {
