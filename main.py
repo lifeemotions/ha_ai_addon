@@ -9,9 +9,11 @@ and streams them to a remote Cloud API.
 import asyncio
 import json
 import logging
+import shutil
 import signal
 import sqlite3
 import sys
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -27,7 +29,13 @@ from const import (
     CONFIG_REFRESH_INTERVAL_MINUTES,
     DATABASE_PATH,
     MAX_RETRIES,
+    MODEL_DIR,
+    MODEL_DOWNLOAD_TIMEOUT_SECONDS,
+    MODEL_ENTRY_POINT,
+    MODEL_REQUIREMENTS_FILE,
+    MODEL_VERSION_FILE,
     ORIGIN,
+    PREDICTION_TIMEOUT_SECONDS,
     REQUEST_TIMEOUT_SECONDS,
     RETRY_DELAY_SECONDS,
     SYNC_INTERVAL_MINUTES,
@@ -416,12 +424,296 @@ class CloudApiClient:
         return None
 
 
+class ModelManager:
+    """Manages downloading, installing, and executing the XGBoost prediction model."""
+
+    def __init__(self, api_client: CloudApiClient):
+        self.api_client = api_client
+        self.model_dir = Path(MODEL_DIR)
+        self.version_file = Path(MODEL_VERSION_FILE)
+        self._installed_version: Optional[str] = self._load_installed_version()
+        self._last_prediction_wall_time: Optional[datetime] = None
+
+    # --- Version tracking ---
+
+    def _load_installed_version(self) -> Optional[str]:
+        """Read installed model version from local version.json."""
+        if not self.version_file.exists():
+            return None
+        try:
+            with open(self.version_file) as f:
+                data = json.load(f)
+            version = data.get("installed_model_version")
+            if version:
+                logger.info(f"Loaded installed model version: {version}")
+            return version
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Failed to load model version file: {e}")
+            return None
+
+    def _save_installed_version(self, version: str) -> None:
+        """Write installed model version to local version.json."""
+        try:
+            self.model_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.version_file, "w") as f:
+                json.dump({"installed_model_version": version}, f, indent=2)
+            logger.info(f"Saved installed model version: {version}")
+        except OSError as e:
+            logger.warning(f"Failed to save model version file: {e}")
+
+    def get_installed_version(self) -> Optional[str]:
+        """Get the currently installed model version."""
+        return self._installed_version
+
+    # --- Download + Install ---
+
+    async def check_and_update(self, config: dict[str, Any]) -> bool:
+        """Compare config model_version to installed. Download if different.
+
+        Returns True if model is ready (either already current or newly installed).
+        Returns False if no model is available.
+        """
+        remote_version = config.get("model_version")
+        if not remote_version:
+            logger.info("No model_version in config, skipping model update")
+            return self.has_model()
+
+        if remote_version == self._installed_version:
+            logger.debug(f"Model already at version {remote_version}")
+            return True
+
+        logger.info(f"Model update available: {self._installed_version} -> {remote_version}")
+
+        archive_path = await self._download_model(remote_version)
+        if archive_path is None:
+            return self.has_model()
+
+        if not self._extract_archive(archive_path):
+            return self.has_model()
+
+        if not await self._install_dependencies():
+            logger.error("Failed to install model dependencies")
+            return False
+
+        self._installed_version = remote_version
+        self._save_installed_version(remote_version)
+        logger.info(f"Model updated to version {remote_version}")
+        return True
+
+    async def _download_model(self, version: str) -> Optional[Path]:
+        """Download model archive from API. Returns path to .tar.gz file or None."""
+        if not self.api_client.auth_token:
+            logger.error("No auth token, cannot download model")
+            return None
+
+        headers = {"Authorization": f"Bearer {self.api_client.auth_token}"}
+        url = f"{self.api_client.api_endpoint}/model/{version}"
+        timeout = aiohttp.ClientTimeout(total=MODEL_DOWNLOAD_TIMEOUT_SECONDS)
+
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = self.model_dir / f"model-{version}.tar.gz"
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                session = await self.api_client._get_session()
+                async with session.get(url, headers=headers, timeout=timeout) as response:
+                    if response.status == 200:
+                        with open(archive_path, "wb") as f:
+                            async for chunk in response.content.iter_chunked(8192):
+                                f.write(chunk)
+                        logger.info(f"Downloaded model v{version} ({archive_path.stat().st_size} bytes)")
+                        return archive_path
+                    elif response.status == 404:
+                        logger.error(f"Model version {version} not found on server (404)")
+                        return None
+                    elif response.status >= 500:
+                        logger.warning(
+                            f"Server error {response.status} downloading model, attempt {attempt}/{MAX_RETRIES}"
+                        )
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"API error {response.status} downloading model: {error_text}")
+                        return None
+
+            except asyncio.TimeoutError:
+                logger.warning(f"Model download timeout on attempt {attempt}/{MAX_RETRIES}")
+            except aiohttp.ClientError as e:
+                logger.warning(f"Network error downloading model on attempt {attempt}/{MAX_RETRIES}: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error downloading model: {e}")
+                return None
+
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+                logger.info(f"Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
+
+        logger.error(f"Failed to download model after {MAX_RETRIES} attempts")
+        return None
+
+    def _extract_archive(self, archive_path: Path) -> bool:
+        """Extract tar.gz archive to model directory."""
+        try:
+            temp_extract_dir = self.model_dir / "_extract_tmp"
+            if temp_extract_dir.exists():
+                shutil.rmtree(temp_extract_dir)
+            temp_extract_dir.mkdir()
+
+            with tarfile.open(archive_path, "r:gz") as tar:
+                # Security: filter out absolute paths and path traversal
+                safe_members = []
+                for member in tar.getmembers():
+                    if member.name.startswith("/") or ".." in member.name:
+                        logger.warning(f"Skipping unsafe tar member: {member.name}")
+                        continue
+                    safe_members.append(member)
+                tar.extractall(path=temp_extract_dir, members=safe_members)
+
+            # Remove old model files (except version.json and the archive itself)
+            for item in self.model_dir.iterdir():
+                if item.name in ("version.json", archive_path.name, "_extract_tmp"):
+                    continue
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+
+            # Move extracted files into model_dir
+            # Handle case where archive has a single top-level directory
+            extracted_items = list(temp_extract_dir.iterdir())
+            if len(extracted_items) == 1 and extracted_items[0].is_dir():
+                source_dir = extracted_items[0]
+            else:
+                source_dir = temp_extract_dir
+
+            for item in source_dir.iterdir():
+                dest = self.model_dir / item.name
+                shutil.move(str(item), str(dest))
+
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+            archive_path.unlink(missing_ok=True)
+            logger.info("Model archive extracted successfully")
+            return True
+
+        except (tarfile.TarError, OSError) as e:
+            logger.error(f"Failed to extract model archive: {e}")
+            return False
+
+    async def _install_dependencies(self) -> bool:
+        """Run pip install from model's requirements.txt if it exists."""
+        req_file = self.model_dir / MODEL_REQUIREMENTS_FILE
+        if not req_file.exists():
+            logger.info("No model requirements.txt, skipping dependency install")
+            return True
+
+        logger.info("Installing model dependencies...")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "pip3", "install", "--no-cache-dir", "-r", str(req_file),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode == 0:
+                logger.info("Model dependencies installed successfully")
+                return True
+            else:
+                logger.error(f"pip install failed (exit code {process.returncode})")
+                if stderr:
+                    logger.error(f"pip stderr: {stderr.decode()}")
+                return False
+
+        except (OSError, FileNotFoundError) as e:
+            logger.error(f"Failed to run pip: {e}")
+            return False
+
+    # --- Prediction execution ---
+
+    def has_model(self) -> bool:
+        """Check if predict.py exists in the model directory."""
+        return (self.model_dir / MODEL_ENTRY_POINT).exists()
+
+    async def run_prediction(self) -> bool:
+        """Execute predict.py as a subprocess."""
+        predict_path = self.model_dir / MODEL_ENTRY_POINT
+        if not predict_path.exists():
+            logger.warning(f"Model entry point {MODEL_ENTRY_POINT} not found, skipping prediction")
+            return False
+
+        logger.info("Running prediction...")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "python3", str(predict_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.model_dir),
+            )
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=PREDICTION_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Prediction timed out after {PREDICTION_TIMEOUT_SECONDS}s, killing process")
+                process.kill()
+                await process.wait()
+                return False
+
+            if process.returncode == 0:
+                logger.info("Prediction completed successfully")
+                if stdout:
+                    logger.info(f"Prediction output: {stdout.decode().strip()}")
+                self._last_prediction_wall_time = datetime.now(timezone.utc)
+                return True
+            else:
+                logger.error(f"Prediction failed (exit code {process.returncode})")
+                if stderr:
+                    logger.error(f"Prediction stderr: {stderr.decode()}")
+                return False
+
+        except (OSError, FileNotFoundError) as e:
+            logger.error(f"Failed to run prediction: {e}")
+            return False
+
+    def should_run_prediction(self, schedule: str, now: Optional[datetime] = None) -> bool:
+        """Evaluate whether prediction should run based on cron schedule."""
+        if not schedule:
+            return False
+        if not self.has_model():
+            return False
+
+        try:
+            from croniter import croniter
+        except ImportError:
+            logger.error("croniter not installed, cannot evaluate prediction schedule")
+            return False
+
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        try:
+            if self._last_prediction_wall_time is None:
+                # Never run before -> should run immediately
+                return True
+
+            cron = croniter(schedule, self._last_prediction_wall_time)
+            next_run = cron.get_next(datetime)
+            return now >= next_run
+
+        except (ValueError, KeyError) as e:
+            logger.error(f"Invalid cron schedule '{schedule}': {e}")
+            return False
+
+
 class EventExtractor:
     """Main orchestrator for the event extraction process."""
 
     def __init__(self):
         self.db_reader = DatabaseReader()
         self.api_client = CloudApiClient()
+        self.model_manager = ModelManager(self.api_client)
         self.running = True
         self.config: Optional[dict[str, Any]] = None
         self._last_config_refresh: float = 0.0
@@ -467,6 +759,15 @@ class EventExtractor:
                     await self.sync_cycle()
                 except Exception as e:
                     logger.error(f"Error in sync cycle: {e}")
+
+                # Check and run prediction if scheduled
+                if self.config:
+                    schedule = self.config.get("prediction_schedule", "")
+                    if self.model_manager.should_run_prediction(schedule):
+                        try:
+                            await self.model_manager.run_prediction()
+                        except Exception as e:
+                            logger.error(f"Error running prediction: {e}")
 
                 if not self.running:
                     break
@@ -516,6 +817,10 @@ class EventExtractor:
             else:
                 logger.warning("No local config available")
         self._last_config_refresh = asyncio.get_event_loop().time()
+
+        # Check for model updates when config is available
+        if self.config:
+            await self.model_manager.check_and_update(self.config)
 
     async def sync_cycle(self) -> None:
         """Perform one sync cycle: fetch checkpoint from API, then fetch and send data."""

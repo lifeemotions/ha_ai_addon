@@ -16,9 +16,9 @@ arch:
   - armhf
   - i386
 
-# Map the config directory to access the database (read-only).
+# Map the config directory (read-write: needed for model downloads and config caching).
 map:
-  - homeassistant_config:ro
+  - homeassistant_config:rw
 
 # Enable access to the Home Assistant API (provides SUPERVISOR_TOKEN)
 homeassistant_api: true

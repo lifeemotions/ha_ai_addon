@@ -1,1 +1,2 @@
 aiohttp>=3.9.0
+croniter>=2.0.0

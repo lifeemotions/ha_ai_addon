@@ -107,3 +107,27 @@ class TestConstantsDefaults:
         from const import CONFIG_REFRESH_INTERVAL_MINUTES
         assert CONFIG_REFRESH_INTERVAL_MINUTES == 60
 
+    def test_model_dir(self):
+        from const import MODEL_DIR
+        assert MODEL_DIR == "/config/lifeemotions_model"
+
+    def test_model_version_file(self):
+        from const import MODEL_VERSION_FILE
+        assert MODEL_VERSION_FILE == "/config/lifeemotions_model/version.json"
+
+    def test_model_entry_point(self):
+        from const import MODEL_ENTRY_POINT
+        assert MODEL_ENTRY_POINT == "predict.py"
+
+    def test_model_requirements_file(self):
+        from const import MODEL_REQUIREMENTS_FILE
+        assert MODEL_REQUIREMENTS_FILE == "requirements.txt"
+
+    def test_model_download_timeout(self):
+        from const import MODEL_DOWNLOAD_TIMEOUT_SECONDS
+        assert MODEL_DOWNLOAD_TIMEOUT_SECONDS == 300
+
+    def test_prediction_timeout(self):
+        from const import PREDICTION_TIMEOUT_SECONDS
+        assert PREDICTION_TIMEOUT_SECONDS == 600
+

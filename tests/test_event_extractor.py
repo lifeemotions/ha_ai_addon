@@ -12,19 +12,23 @@ from main import EventExtractor
 class TestEventExtractorInit:
     """Tests for EventExtractor initialization."""
 
+    @patch("main.ModelManager")
     @patch("main.DatabaseReader")
     @patch("main.CloudApiClient")
-    def test_init_creates_components(self, mock_api, mock_db):
+    def test_init_creates_components(self, mock_api, mock_db, mock_model):
         extractor = EventExtractor()
         assert extractor.running is True
         assert extractor.config is None
         assert extractor._last_config_refresh == 0.0
         mock_db.assert_called_once()
         mock_api.assert_called_once()
+        mock_model.assert_called_once()
+        assert extractor.model_manager is not None
 
+    @patch("main.ModelManager")
     @patch("main.DatabaseReader")
     @patch("main.CloudApiClient")
-    def test_init_has_no_checkpoint_manager(self, mock_api, mock_db):
+    def test_init_has_no_checkpoint_manager(self, mock_api, mock_db, mock_model):
         extractor = EventExtractor()
         assert not hasattr(extractor, "checkpoint_manager")
 
@@ -203,6 +207,7 @@ class TestRun:
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
+        extractor.model_manager = MagicMock()
         extractor.running = True
         extractor.config = None
         extractor._last_config_refresh = 0.0
@@ -221,6 +226,8 @@ class TestRun:
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
+        extractor.model_manager = MagicMock()
+        extractor.model_manager.should_run_prediction = MagicMock(return_value=False)
         extractor.running = True
         extractor.config = None
         extractor._last_config_refresh = 0.0
@@ -252,6 +259,8 @@ class TestRun:
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
+        extractor.model_manager = MagicMock()
+        extractor.model_manager.should_run_prediction = MagicMock(return_value=False)
         extractor.running = True
         extractor.config = None
         extractor._last_config_refresh = 0.0
@@ -277,6 +286,103 @@ class TestRun:
 
         assert call_count == 2  # Recovered from first failure, ran again
 
+    @pytest.mark.asyncio
+    async def test_run_executes_prediction_when_scheduled(self):
+        """Prediction should run when schedule says it's time."""
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.db_reader = MagicMock()
+        extractor.api_client = AsyncMock()
+        extractor.model_manager = MagicMock()
+        extractor.model_manager.should_run_prediction = MagicMock(return_value=True)
+        extractor.model_manager.run_prediction = AsyncMock(return_value=True)
+        extractor.running = True
+        extractor.config = {"prediction_schedule": "0 * * * *"}
+        extractor._last_config_refresh = 0.0
+
+        call_count = 0
+
+        async def fake_sync():
+            nonlocal call_count
+            call_count += 1
+            extractor.running = False
+
+        extractor.sync_cycle = fake_sync
+        extractor._refresh_config = AsyncMock()
+
+        with patch("main.Path") as mock_path, \
+             patch("main.DATABASE_PATH", "/fake/db"), \
+             patch("main.CLOUD_AUTH_TOKEN", "token123456"):
+            mock_path.return_value.exists.return_value = True
+            await extractor.run()
+
+        extractor.model_manager.should_run_prediction.assert_called_once_with("0 * * * *")
+        extractor.model_manager.run_prediction.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_run_skips_prediction_when_not_scheduled(self):
+        """Prediction should not run when schedule says not yet."""
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.db_reader = MagicMock()
+        extractor.api_client = AsyncMock()
+        extractor.model_manager = MagicMock()
+        extractor.model_manager.should_run_prediction = MagicMock(return_value=False)
+        extractor.model_manager.run_prediction = AsyncMock()
+        extractor.running = True
+        extractor.config = {"prediction_schedule": "0 * * * *"}
+        extractor._last_config_refresh = 0.0
+
+        call_count = 0
+
+        async def fake_sync():
+            nonlocal call_count
+            call_count += 1
+            extractor.running = False
+
+        extractor.sync_cycle = fake_sync
+        extractor._refresh_config = AsyncMock()
+
+        with patch("main.Path") as mock_path, \
+             patch("main.DATABASE_PATH", "/fake/db"), \
+             patch("main.CLOUD_AUTH_TOKEN", "token123456"):
+            mock_path.return_value.exists.return_value = True
+            await extractor.run()
+
+        extractor.model_manager.run_prediction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_handles_prediction_exception(self):
+        """Prediction exceptions should be caught and not crash the loop."""
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.db_reader = MagicMock()
+        extractor.api_client = AsyncMock()
+        extractor.model_manager = MagicMock()
+        extractor.model_manager.should_run_prediction = MagicMock(return_value=True)
+        extractor.model_manager.run_prediction = AsyncMock(side_effect=RuntimeError("prediction crashed"))
+        extractor.running = True
+        extractor.config = {"prediction_schedule": "0 * * * *"}
+        extractor._last_config_refresh = 0.0
+
+        call_count = 0
+
+        async def fake_sync():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                extractor.running = False
+
+        extractor.sync_cycle = fake_sync
+        extractor._refresh_config = AsyncMock()
+
+        with patch("main.Path") as mock_path, \
+             patch("main.DATABASE_PATH", "/fake/db"), \
+             patch("main.CLOUD_AUTH_TOKEN", "token123456"), \
+             patch("main.asyncio.sleep", new_callable=AsyncMock):
+            mock_path.return_value.exists.return_value = True
+            await extractor.run()
+
+        # Should have recovered from prediction exception
+        assert call_count == 2
+
 
 class TestRefreshConfig:
     """Tests for EventExtractor._refresh_config()."""
@@ -285,6 +391,8 @@ class TestRefreshConfig:
     async def test_refresh_config_saves_to_disk_on_success(self, tmp_path):
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.api_client = AsyncMock()
+        extractor.model_manager = AsyncMock()
+        extractor.model_manager.check_and_update = AsyncMock(return_value=True)
         extractor.config = None
         extractor._last_config_refresh = 0.0
 
@@ -298,11 +406,14 @@ class TestRefreshConfig:
         assert extractor.config == config_data
         assert config_file.exists()
         assert json.loads(config_file.read_text()) == config_data
+        extractor.model_manager.check_and_update.assert_called_once_with(config_data)
 
     @pytest.mark.asyncio
     async def test_refresh_config_falls_back_to_local(self, tmp_path):
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.api_client = AsyncMock()
+        extractor.model_manager = AsyncMock()
+        extractor.model_manager.check_and_update = AsyncMock(return_value=True)
         extractor.config = None
         extractor._last_config_refresh = 0.0
 
@@ -316,11 +427,14 @@ class TestRefreshConfig:
             await extractor._refresh_config()
 
         assert extractor.config == config_data
+        extractor.model_manager.check_and_update.assert_called_once_with(config_data)
 
     @pytest.mark.asyncio
     async def test_refresh_config_none_when_no_fallback(self, tmp_path):
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.api_client = AsyncMock()
+        extractor.model_manager = AsyncMock()
+        extractor.model_manager.check_and_update = AsyncMock()
         extractor.config = None
         extractor._last_config_refresh = 0.0
 
@@ -330,6 +444,8 @@ class TestRefreshConfig:
             await extractor._refresh_config()
 
         assert extractor.config is None
+        # Model check should NOT be called when config is None
+        extractor.model_manager.check_and_update.assert_not_called()
 
 
 class TestLoadLocalConfig:

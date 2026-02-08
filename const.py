@@ -45,6 +45,14 @@ RETRY_DELAY_SECONDS = 5
 # Origin identifier
 ORIGIN = "local"
 
+# Model management
+MODEL_DIR = "/config/lifeemotions_model"
+MODEL_VERSION_FILE = "/config/lifeemotions_model/version.json"
+MODEL_ENTRY_POINT = "predict.py"
+MODEL_REQUIREMENTS_FILE = "requirements.txt"
+MODEL_DOWNLOAD_TIMEOUT_SECONDS = 300
+PREDICTION_TIMEOUT_SECONDS = 600
+
 # Table names
 EVENTS_TABLE = "events"
 STATES_TABLE = "states"
