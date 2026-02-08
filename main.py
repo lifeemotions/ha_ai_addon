@@ -23,6 +23,8 @@ from const import (
     API_ENDPOINT,
     BATCH_SIZE,
     CLOUD_AUTH_TOKEN,
+    CONFIG_FILE_PATH,
+    CONFIG_REFRESH_INTERVAL_MINUTES,
     DATABASE_PATH,
     MAX_RETRIES,
     ORIGIN,
@@ -253,7 +255,7 @@ class CloudApiClient:
             try:
                 session = await self._get_session()
                 async with session.get(
-                    self.api_endpoint,
+                    f"{self.api_endpoint}/data",
                     headers=headers,
                 ) as response:
                     if response.status == 200:
@@ -324,7 +326,7 @@ class CloudApiClient:
             try:
                 session = await self._get_session()
                 async with session.post(
-                    self.api_endpoint,
+                    f"{self.api_endpoint}/data",
                     headers=headers,
                     json=payload,
                 ) as response:
@@ -358,6 +360,61 @@ class CloudApiClient:
         logger.error(f"Failed to send batch after {MAX_RETRIES} attempts")
         return False
 
+    async def fetch_config(self) -> Optional[dict[str, Any]]:
+        """
+        Fetch remote configuration from the Cloud API.
+
+        Returns the config dict on success, or None on failure.
+        """
+        if not self.auth_token:
+            logger.error("No authentication token configured. Cannot fetch config.")
+            return None
+
+        headers = {
+            "Authorization": f"Bearer {self.auth_token}",
+        }
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                session = await self._get_session()
+                async with session.get(
+                    f"{self.api_endpoint}/config",
+                    headers=headers,
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        logger.info(f"Fetched remote config from API: {list(data.keys())}")
+                        return data
+                    elif response.status >= 500:
+                        logger.warning(
+                            f"Server error {response.status} fetching config on attempt {attempt}/{MAX_RETRIES}"
+                        )
+                    else:
+                        error_text = await response.text()
+                        logger.error(
+                            f"API error {response.status} fetching config: {error_text}"
+                        )
+                        return None
+
+            except asyncio.TimeoutError:
+                logger.warning(f"Config request timeout on attempt {attempt}/{MAX_RETRIES}")
+            except aiohttp.ClientError as e:
+                logger.warning(f"Network error fetching config on attempt {attempt}/{MAX_RETRIES}: {e}")
+            except (ValueError, KeyError) as e:
+                logger.error(f"Invalid config response from API: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Unexpected error fetching config: {e}")
+                return None
+
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+                logger.info(f"Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
+
+        logger.error(f"Failed to fetch config after {MAX_RETRIES} attempts")
+        return None
+
 
 class EventExtractor:
     """Main orchestrator for the event extraction process."""
@@ -366,6 +423,8 @@ class EventExtractor:
         self.db_reader = DatabaseReader()
         self.api_client = CloudApiClient()
         self.running = True
+        self.config: Optional[dict[str, Any]] = None
+        self._last_config_refresh: float = 0.0
 
     async def run(self) -> None:
         """Main run loop."""
@@ -394,8 +453,16 @@ class EventExtractor:
             logger.error("Recorder may not be using SQLite, or the database has not been created yet")
             return
 
+        # Fetch remote config on startup
+        await self._refresh_config()
+
         try:
             while self.running:
+                # Refresh config periodically
+                elapsed = asyncio.get_event_loop().time() - self._last_config_refresh
+                if elapsed >= CONFIG_REFRESH_INTERVAL_MINUTES * 60:
+                    await self._refresh_config()
+
                 try:
                     await self.sync_cycle()
                 except Exception as e:
@@ -411,6 +478,44 @@ class EventExtractor:
                     break
         finally:
             await self.api_client.close()
+
+    def _load_local_config(self) -> Optional[dict[str, Any]]:
+        """Load config from local JSON file."""
+        config_path = Path(CONFIG_FILE_PATH)
+        if not config_path.exists():
+            return None
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            logger.info(f"Loaded local config from {CONFIG_FILE_PATH}")
+            return config
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Failed to load local config: {e}")
+            return None
+
+    def _save_local_config(self, config: dict[str, Any]) -> None:
+        """Save config to local JSON file."""
+        try:
+            with open(CONFIG_FILE_PATH, "w") as f:
+                json.dump(config, f, indent=2)
+            logger.info(f"Saved config to {CONFIG_FILE_PATH}")
+        except OSError as e:
+            logger.warning(f"Failed to save local config: {e}")
+
+    async def _refresh_config(self) -> None:
+        """Fetch config from API, falling back to local file."""
+        config = await self.api_client.fetch_config()
+        if config is not None:
+            self.config = config
+            self._save_local_config(config)
+        else:
+            logger.warning("Failed to fetch remote config, falling back to local config")
+            local = self._load_local_config()
+            if local is not None:
+                self.config = local
+            else:
+                logger.warning("No local config available")
+        self._last_config_refresh = asyncio.get_event_loop().time()
 
     async def sync_cycle(self) -> None:
         """Perform one sync cycle: fetch checkpoint from API, then fetch and send data."""

@@ -1,7 +1,8 @@
 """Tests for EventExtractor class."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+import json
+from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 import pytest
 
@@ -16,6 +17,8 @@ class TestEventExtractorInit:
     def test_init_creates_components(self, mock_api, mock_db):
         extractor = EventExtractor()
         assert extractor.running is True
+        assert extractor.config is None
+        assert extractor._last_config_refresh == 0.0
         mock_db.assert_called_once()
         mock_api.assert_called_once()
 
@@ -201,6 +204,8 @@ class TestRun:
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
         extractor.running = True
+        extractor.config = None
+        extractor._last_config_refresh = 0.0
 
         with patch("main.Path") as mock_path, \
              patch("main.DATABASE_PATH", "/nonexistent/db"), \
@@ -217,6 +222,8 @@ class TestRun:
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
         extractor.running = True
+        extractor.config = None
+        extractor._last_config_refresh = 0.0
 
         call_count = 0
 
@@ -226,6 +233,7 @@ class TestRun:
             extractor.running = False
 
         extractor.sync_cycle = fake_sync
+        extractor._refresh_config = AsyncMock()
 
         with patch("main.Path") as mock_path, \
              patch("main.DATABASE_PATH", "/fake/db"), \
@@ -235,6 +243,8 @@ class TestRun:
 
         assert call_count == 1
         extractor.api_client.close.assert_called_once()
+        # Config should be refreshed on startup
+        extractor._refresh_config.assert_called()
 
     @pytest.mark.asyncio
     async def test_run_handles_sync_cycle_exception(self):
@@ -243,6 +253,8 @@ class TestRun:
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
         extractor.running = True
+        extractor.config = None
+        extractor._last_config_refresh = 0.0
 
         call_count = 0
 
@@ -254,6 +266,7 @@ class TestRun:
             extractor.running = False
 
         extractor.sync_cycle = failing_sync
+        extractor._refresh_config = AsyncMock()
 
         with patch("main.Path") as mock_path, \
              patch("main.DATABASE_PATH", "/fake/db"), \
@@ -263,3 +276,113 @@ class TestRun:
             await extractor.run()
 
         assert call_count == 2  # Recovered from first failure, ran again
+
+
+class TestRefreshConfig:
+    """Tests for EventExtractor._refresh_config()."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_config_saves_to_disk_on_success(self, tmp_path):
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.api_client = AsyncMock()
+        extractor.config = None
+        extractor._last_config_refresh = 0.0
+
+        config_data = {"feature_flags": {"sync_states": True}}
+        extractor.api_client.fetch_config = AsyncMock(return_value=config_data)
+
+        config_file = tmp_path / "config.json"
+        with patch("main.CONFIG_FILE_PATH", str(config_file)):
+            await extractor._refresh_config()
+
+        assert extractor.config == config_data
+        assert config_file.exists()
+        assert json.loads(config_file.read_text()) == config_data
+
+    @pytest.mark.asyncio
+    async def test_refresh_config_falls_back_to_local(self, tmp_path):
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.api_client = AsyncMock()
+        extractor.config = None
+        extractor._last_config_refresh = 0.0
+
+        extractor.api_client.fetch_config = AsyncMock(return_value=None)
+
+        config_data = {"feature_flags": {"sync_states": False}}
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps(config_data))
+
+        with patch("main.CONFIG_FILE_PATH", str(config_file)):
+            await extractor._refresh_config()
+
+        assert extractor.config == config_data
+
+    @pytest.mark.asyncio
+    async def test_refresh_config_none_when_no_fallback(self, tmp_path):
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.api_client = AsyncMock()
+        extractor.config = None
+        extractor._last_config_refresh = 0.0
+
+        extractor.api_client.fetch_config = AsyncMock(return_value=None)
+
+        with patch("main.CONFIG_FILE_PATH", str(tmp_path / "nonexistent.json")):
+            await extractor._refresh_config()
+
+        assert extractor.config is None
+
+
+class TestLoadLocalConfig:
+    """Tests for EventExtractor._load_local_config()."""
+
+    def test_load_valid_config(self, tmp_path):
+        extractor = EventExtractor.__new__(EventExtractor)
+        config_data = {"settings": {"batch_size": 200}}
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps(config_data))
+
+        with patch("main.CONFIG_FILE_PATH", str(config_file)):
+            result = extractor._load_local_config()
+
+        assert result == config_data
+
+    def test_load_missing_file_returns_none(self, tmp_path):
+        extractor = EventExtractor.__new__(EventExtractor)
+
+        with patch("main.CONFIG_FILE_PATH", str(tmp_path / "nonexistent.json")):
+            result = extractor._load_local_config()
+
+        assert result is None
+
+    def test_load_invalid_json_returns_none(self, tmp_path):
+        extractor = EventExtractor.__new__(EventExtractor)
+        config_file = tmp_path / "config.json"
+        config_file.write_text("not valid json {{")
+
+        with patch("main.CONFIG_FILE_PATH", str(config_file)):
+            result = extractor._load_local_config()
+
+        assert result is None
+
+
+class TestSaveLocalConfig:
+    """Tests for EventExtractor._save_local_config()."""
+
+    def test_save_config(self, tmp_path):
+        extractor = EventExtractor.__new__(EventExtractor)
+        config_data = {"entity_filters": {"include": ["light.*"]}}
+        config_file = tmp_path / "config.json"
+
+        with patch("main.CONFIG_FILE_PATH", str(config_file)):
+            extractor._save_local_config(config_data)
+
+        assert config_file.exists()
+        assert json.loads(config_file.read_text()) == config_data
+
+    def test_save_config_handles_write_error(self):
+        extractor = EventExtractor.__new__(EventExtractor)
+        config_data = {"key": "value"}
+
+        with patch("main.CONFIG_FILE_PATH", "/nonexistent/dir/config.json"):
+            # Should not raise, just log warning
+            extractor._save_local_config(config_data)

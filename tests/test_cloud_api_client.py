@@ -148,11 +148,12 @@ class TestSendBatch:
         result = await client.send_batch(sample_event_records)
         assert result is True
 
-        # Verify correct headers and payload structure
-        call_kwargs = mock_session.post.call_args
-        assert call_kwargs[1]["headers"]["Authorization"] == "Bearer test-token-1234"
-        assert call_kwargs[1]["headers"]["Content-Type"] == "application/json"
-        payload = call_kwargs[1]["json"]
+        # Verify correct URL, headers and payload structure
+        call_args = mock_session.post.call_args
+        assert call_args[0][0] == "https://api.test.com/ingest/data"
+        assert call_args[1]["headers"]["Authorization"] == "Bearer test-token-1234"
+        assert call_args[1]["headers"]["Content-Type"] == "application/json"
+        payload = call_args[1]["json"]
         assert "records" in payload
         assert payload["source"] == "home_assistant"
         assert "sent_at" in payload
@@ -347,9 +348,10 @@ class TestFetchCheckpoint:
         result = await client.fetch_checkpoint()
         assert result == 1705320000.0
 
-        # Verify auth header
-        call_kwargs = mock_session.get.call_args
-        assert call_kwargs[1]["headers"]["Authorization"] == "Bearer test-token"
+        # Verify correct URL and auth header
+        call_args = mock_session.get.call_args
+        assert call_args[0][0] == "https://api.test.com/ingest/data"
+        assert call_args[1]["headers"]["Authorization"] == "Bearer test-token"
 
     @pytest.mark.asyncio
     async def test_successful_fetch_zero_timestamp(self):
@@ -526,3 +528,152 @@ class TestFetchCheckpoint:
 
         result = await client.fetch_checkpoint()
         assert result is None
+
+
+class TestFetchConfig:
+    """Tests for CloudApiClient.fetch_config()."""
+
+    @pytest.mark.asyncio
+    async def test_no_auth_token_returns_none(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="",
+        )
+        result = await client.fetch_config()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_successful_fetch(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+
+        config_data = {
+            "entity_filters": {"include": ["light.*"]},
+            "feature_flags": {"sync_states": True},
+            "settings": {"batch_size": 200},
+        }
+        mock_session = _make_mock_session(
+            {"status": 200, "json": config_data},
+            method="get",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        result = await client.fetch_config()
+        assert result == config_data
+
+        # Verify correct URL and auth header
+        call_args = mock_session.get.call_args
+        assert call_args[0][0] == "https://api.test.com/ha/config"
+        assert call_args[1]["headers"]["Authorization"] == "Bearer test-token"
+
+    @pytest.mark.asyncio
+    async def test_client_error_returns_none(self):
+        """4xx errors should return None immediately."""
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+
+        mock_session = _make_mock_session(
+            {"status": 401, "text": "Unauthorized"},
+            method="get",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        result = await client.fetch_config()
+        assert result is None
+        assert mock_session.get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_server_error_retries(self):
+        """5xx errors should trigger retries."""
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+
+        mock_session = _make_mock_session({"status": 500}, method="get")
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        with patch("main.asyncio.sleep", new_callable=AsyncMock):
+            result = await client.fetch_config()
+
+        assert result is None
+        from const import MAX_RETRIES
+        assert mock_session.get.call_count == MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_timeout_retries(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(side_effect=asyncio.TimeoutError())
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        with patch("main.asyncio.sleep", new_callable=AsyncMock):
+            result = await client.fetch_config()
+
+        assert result is None
+        from const import MAX_RETRIES
+        assert mock_session.get.call_count == MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_network_error_retries(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(side_effect=aiohttp.ClientError("Connection refused"))
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        with patch("main.asyncio.sleep", new_callable=AsyncMock):
+            result = await client.fetch_config()
+
+        assert result is None
+        from const import MAX_RETRIES
+        assert mock_session.get.call_count == MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_returns_none_no_retry(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(side_effect=RuntimeError("Something unexpected"))
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        result = await client.fetch_config()
+        assert result is None
+        assert mock_session.get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_server_error_then_success(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+
+        config_data = {"feature_flags": {"sync_states": True}}
+        mock_session = _make_mock_session(
+            [
+                {"status": 503},
+                {"status": 200, "json": config_data},
+            ],
+            method="get",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        with patch("main.asyncio.sleep", new_callable=AsyncMock):
+            result = await client.fetch_config()
+
+        assert result == config_data
+        assert mock_session.get.call_count == 2

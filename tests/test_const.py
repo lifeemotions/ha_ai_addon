@@ -69,7 +69,7 @@ class TestConstantsDefaults:
 
     def test_api_endpoint(self):
         from const import API_ENDPOINT
-        assert API_ENDPOINT == "https://api.life-emotions.com/ha/data"
+        assert API_ENDPOINT == "https://api.life-emotions.com/ha"
 
     def test_default_sync_interval(self):
         from const import DEFAULT_SYNC_INTERVAL_MINUTES
@@ -98,4 +98,12 @@ class TestConstantsDefaults:
     def test_database_path(self):
         from const import DATABASE_PATH
         assert DATABASE_PATH == "/config/home-assistant_v2.db"
+
+    def test_config_file_path(self):
+        from const import CONFIG_FILE_PATH
+        assert CONFIG_FILE_PATH == "/config/lifeemotions_config.json"
+
+    def test_config_refresh_interval(self):
+        from const import CONFIG_REFRESH_INTERVAL_MINUTES
+        assert CONFIG_REFRESH_INTERVAL_MINUTES == 60
 

@@ -9,8 +9,12 @@ logger = logging.getLogger("lifeemotions_ai_addon")
 DATABASE_PATH = "/config/home-assistant_v2.db"
 
 # API configuration
-API_ENDPOINT = "https://api.life-emotions.com/ha/data"
+API_ENDPOINT = "https://api.life-emotions.com/ha"
 CLOUD_AUTH_TOKEN = os.environ.get("CLOUD_AUTH_TOKEN", "")
+
+# Remote config
+CONFIG_FILE_PATH = "/config/lifeemotions_config.json"
+CONFIG_REFRESH_INTERVAL_MINUTES = 60
 
 
 def _parse_int_env(name: str, default: int) -> int:
