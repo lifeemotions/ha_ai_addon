@@ -45,16 +45,53 @@
                    └───────────────┘
 ```
 
+## Repository Structure
+
+This repo is a valid **Home Assistant custom add-on repository**. HA Supervisor expects addon files in a subdirectory matching the slug.
+
+```
+ha_ai_addon/                          # Repo root
+├── repository.json                   # HA repo metadata
+├── CLAUDE.md                         # This file
+├── README.md                         # Repo-level docs
+├── pytest.ini                        # Test config (pythonpath = lifeemotions_ai_addon)
+├── scripts/                          # Dev scripts
+│   └── run_tests.sh
+├── tests/                            # All tests (unit + integration)
+│   ├── conftest.py
+│   ├── test_database_reader.py
+│   ├── test_cloud_api_client.py
+│   ├── test_event_extractor.py
+│   ├── test_model_manager.py
+│   ├── test_const.py
+│   ├── test_integration_ha_docker.py
+│   └── test_integration_addon_install.py
+└── lifeemotions_ai_addon/            # Addon subdirectory (HA build context)
+    ├── config.yaml                   # Addon manifest
+    ├── build.yaml                    # Build config (architectures)
+    ├── Dockerfile                    # Container build
+    ├── run.sh                        # Entrypoint
+    ├── main.py                       # Core logic
+    ├── const.py                      # Constants
+    ├── ha_api.py                     # HA REST API client
+    ├── requirements.txt              # Python deps
+    ├── CHANGELOG.md
+    ├── README.md                     # Addon-specific docs (shown in HA UI)
+    ├── icon.png                      # 128x128 addon icon
+    └── logo.png                      # 128x128 addon logo
+```
+
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `main.py` | Core logic: `DatabaseReader`, `CloudApiClient`, `EventExtractor` |
-| `const.py` | Configuration constants (env vars, defaults) |
-| `ha_api.py` | Home Assistant REST API client (unused currently) |
-| `run.sh` | Entrypoint script |
-| `config.yaml` | Add-on manifest (name, version, options, min HA version) |
-| `Dockerfile` | Container build definition |
+| `lifeemotions_ai_addon/main.py` | Core logic: `DatabaseReader`, `CloudApiClient`, `EventExtractor`, `ModelManager` |
+| `lifeemotions_ai_addon/const.py` | Configuration constants (env vars, defaults) |
+| `lifeemotions_ai_addon/ha_api.py` | Home Assistant REST API client (unused currently) |
+| `lifeemotions_ai_addon/run.sh` | Entrypoint script |
+| `lifeemotions_ai_addon/config.yaml` | Add-on manifest (name, version, options, min HA version) |
+| `lifeemotions_ai_addon/Dockerfile` | Container build definition |
+| `repository.json` | HA custom repo metadata |
 
 ## Database Schema (HA 2023.4+)
 
@@ -89,8 +126,8 @@ WHERE s.last_updated_ts > ?
 Use the test runner script for convenience:
 
 ```bash
-./scripts/run_tests.sh          # Run all tests (106 total)
-./scripts/run_tests.sh unit     # Run only unit tests (94 tests, fast)
+./scripts/run_tests.sh          # Run all tests
+./scripts/run_tests.sh unit     # Run only unit tests (175 tests, fast)
 ./scripts/run_tests.sh ha       # Run only HA Docker integration tests (3 tests)
 ./scripts/run_tests.sh addon    # Run only add-on installation tests (9 tests, ~3 min)
 ./scripts/run_tests.sh fast     # Run unit + HA Docker tests (skip slow addon tests)
@@ -98,7 +135,7 @@ Use the test runner script for convenience:
 
 Or run directly with pytest:
 
-### Unit Tests (94 tests, fast, no Docker)
+### Unit Tests (175 tests, fast, no Docker)
 ```bash
 .venv/bin/python -m pytest tests/ -v \
     --ignore=tests/test_integration_addon_install.py \
@@ -135,14 +172,15 @@ These tests:
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
 | `test_database_reader.py` | 30 | `DatabaseReader` fetch/parse methods |
-| `test_cloud_api_client.py` | 30 | `CloudApiClient` send/checkpoint with retry logic |
-| `test_event_extractor.py` | 18 | `EventExtractor` sync cycle orchestration |
-| `test_const.py` | 16 | Environment variable parsing |
+| `test_cloud_api_client.py` | 38 | `CloudApiClient` send/checkpoint/config with retry logic |
+| `test_event_extractor.py` | 29 | `EventExtractor` sync cycle, config refresh, predictions |
+| `test_model_manager.py` | 36 | `ModelManager` download, extract, install, predict |
+| `test_const.py` | 42 | Environment variable parsing, constant defaults |
 | `test_integration_ha_docker.py` | 3 | End-to-end with real HA Core container |
 | `test_integration_addon_install.py` | 9 | Add-on installation into HA Supervisor |
 
 - Test framework: pytest with pytest-asyncio, pytest-docker
-- Config: `pytest.ini` (asyncio_mode=auto)
+- Config: `pytest.ini` (asyncio_mode=auto, pythonpath=lifeemotions_ai_addon)
 - Integration tests marked with `@pytest.mark.integration`
 - Slow tests marked with `@pytest.mark.slow`
 
@@ -154,7 +192,7 @@ These tests:
 
 ## Add-on Configuration Options
 
-Configured via HA UI, defined in `config.yaml`:
+Configured via HA UI, defined in `lifeemotions_ai_addon/config.yaml`:
 - `cloud_auth_token`: Bearer token for Cloud API authentication
 - `sync_interval_minutes`: How often to sync (1-1440, default 5)
 - `batch_size`: Records per API call (10-1000, default 100)
