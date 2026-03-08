@@ -1,12 +1,15 @@
 """Shared fixtures for Life Emotions AI tests."""
 
+import asyncio
 import json
 import sqlite3
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import web
 
 
 @pytest.fixture
@@ -186,3 +189,83 @@ def sample_state_records():
             "origin": "local",
         },
     ]
+
+
+# ---------------------------------------------------------------------------
+# Mock Cloud API server (aiohttp.web)
+# ---------------------------------------------------------------------------
+
+
+class MockCloudApiState:
+    """Tracks all requests received by the mock Cloud API server."""
+
+    def __init__(self):
+        self.received_batches: list[dict] = []
+        self.checkpoint_calls: int = 0
+        self.config_calls: int = 0
+        self.checkpoint_timestamp: float = 0.0
+        self.config_response: dict = {}
+
+    def reset(self):
+        self.received_batches.clear()
+        self.checkpoint_calls = 0
+        self.config_calls = 0
+        self.checkpoint_timestamp = 0.0
+        self.config_response = {}
+
+
+def _create_mock_cloud_app(state: MockCloudApiState) -> web.Application:
+    """Build an aiohttp.web application that mimics the Cloud API endpoints."""
+
+    async def handle_get_data(request: web.Request) -> web.Response:
+        """GET /ha/data — return checkpoint timestamp."""
+        state.checkpoint_calls += 1
+        return web.json_response({"last_timestamp": state.checkpoint_timestamp})
+
+    async def handle_post_data(request: web.Request) -> web.Response:
+        """POST /ha/data — accept a batch of records."""
+        body = await request.json()
+        state.received_batches.append(body)
+        records = body.get("records", [])
+        return web.json_response(
+            {"records_received": len(records)},
+            status=201,
+        )
+
+    async def handle_get_config(request: web.Request) -> web.Response:
+        """GET /ha/config — return remote config."""
+        state.config_calls += 1
+        return web.json_response(state.config_response)
+
+    app = web.Application()
+    app.router.add_get("/ha/data", handle_get_data)
+    app.router.add_post("/ha/data", handle_post_data)
+    app.router.add_get("/ha/config", handle_get_config)
+    return app
+
+
+@pytest.fixture
+async def mock_cloud_api():
+    """Start a mock Cloud API server on a random port.
+
+    Yields (base_url, state) where:
+      - base_url is like "http://127.0.0.1:PORT/ha"
+      - state is a MockCloudApiState for inspecting and configuring the server
+    """
+    state = MockCloudApiState()
+    app = _create_mock_cloud_app(state)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)  # port 0 = OS picks a free port
+    await site.start()
+
+    # Extract the actual bound port
+    sockets = site._server.sockets  # type: ignore[union-attr]
+    port = sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}/ha"
+
+    try:
+        yield base_url, state
+    finally:
+        await runner.cleanup()

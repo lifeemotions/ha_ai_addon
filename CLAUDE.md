@@ -129,6 +129,7 @@ Use the test runner script for convenience:
 ./scripts/run_tests.sh          # Run all tests
 ./scripts/run_tests.sh unit     # Run only unit tests (175 tests, fast)
 ./scripts/run_tests.sh ha       # Run only HA Docker integration tests (3 tests)
+./scripts/run_tests.sh e2e      # Run only E2E integration tests (HA + mock Cloud API)
 ./scripts/run_tests.sh addon    # Run only add-on installation tests (9 tests, ~3 min)
 ./scripts/run_tests.sh fast     # Run unit + HA Docker tests (skip slow addon tests)
 ```
@@ -139,7 +140,8 @@ Or run directly with pytest:
 ```bash
 .venv/bin/python -m pytest tests/ -v \
     --ignore=tests/test_integration_addon_install.py \
-    --ignore=tests/test_integration_ha_docker.py
+    --ignore=tests/test_integration_ha_docker.py \
+    --ignore=tests/test_integration_e2e.py
 ```
 
 ### HA Docker Integration Tests (3 tests)
@@ -153,6 +155,17 @@ These tests:
 - Simulate activity via REST API (`POST /api/states/<entity_id>`)
 - Copy the SQLite DB out of the container (including WAL files)
 - Run `DatabaseReader` against the real DB
+
+### E2E Integration Tests (HA + mock Cloud API)
+```bash
+.venv/bin/python -m pytest tests/test_integration_e2e.py -v
+```
+
+These tests:
+- Start a real HA Core container (same as HA Docker tests)
+- Start an in-process mock Cloud API server (aiohttp.web on a random port)
+- Run `EventExtractor.sync_cycle()` with real DB data flowing to the mock API
+- Verify the full pipeline: DB read → batch send → checkpoint handling
 
 ### Add-on Installation Integration Tests (9 tests, ~3 min)
 ```bash
@@ -177,6 +190,7 @@ These tests:
 | `test_model_manager.py` | 36 | `ModelManager` download, extract, install, predict |
 | `test_const.py` | 42 | Environment variable parsing, constant defaults |
 | `test_integration_ha_docker.py` | 3 | End-to-end with real HA Core container |
+| `test_integration_e2e.py` | 5 | Full pipeline: HA DB → addon → mock Cloud API |
 | `test_integration_addon_install.py` | 9 | Add-on installation into HA Supervisor |
 
 - Test framework: pytest with pytest-asyncio, pytest-docker
@@ -196,3 +210,11 @@ Configured via HA UI, defined in `lifeemotions_ai_addon/config.yaml`:
 - `cloud_auth_token`: Bearer token for Cloud API authentication
 - `sync_interval_minutes`: How often to sync (1-1440, default 5)
 - `batch_size`: Records per API call (10-1000, default 100)
+
+## Environment Variables
+
+All read in `lifeemotions_ai_addon/const.py`:
+- `CLOUD_AUTH_TOKEN`: Bearer token (set by `run.sh` from HA addon options)
+- `SYNC_INTERVAL_MINUTES`: Sync interval in minutes (default 5)
+- `BATCH_SIZE`: Records per API call (default 100)
+- `API_ENDPOINT`: Cloud API base URL (default `https://api.life-emotions.com/ha`). Override for testing, e.g. `http://localhost:8080/ha`

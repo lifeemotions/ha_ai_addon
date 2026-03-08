@@ -9,7 +9,7 @@ logger = logging.getLogger("lifeemotions_ai_addon")
 DATABASE_PATH = "/config/home-assistant_v2.db"
 
 # API configuration
-API_ENDPOINT = "https://api.life-emotions.com/ha"
+API_ENDPOINT = os.environ.get("API_ENDPOINT", "https://api.life-emotions.com/ha")
 CLOUD_AUTH_TOKEN = os.environ.get("CLOUD_AUTH_TOKEN", "")
 
 # Remote config
