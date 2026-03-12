@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import requests
@@ -129,6 +130,7 @@ class TestEndToEndSyncCycle:
     async def test_full_sync_cycle(self, ha_database_path, mock_cloud_api):
         """EventExtractor.sync_cycle() reads from real HA DB and sends to mock API."""
         mock_url, state = mock_cloud_api
+        state.reset()
 
         # Checkpoint at 0 means "sync everything"
         state.checkpoint_timestamp = 0.0
@@ -137,10 +139,9 @@ class TestEndToEndSyncCycle:
         db_reader = DatabaseReader(db_path=ha_database_path)
         api_client = CloudApiClient(api_endpoint=mock_url, auth_token="e2e-test-token")
 
-        # Construct EventExtractor and override its components
-        extractor = EventExtractor()
-        extractor.db_reader = db_reader
-        extractor.api_client = api_client
+        # Construct EventExtractor with injected dependencies
+        extractor = EventExtractor(db_reader=db_reader, api_client=api_client)
+        extractor.model_manager.api_client = api_client
 
         # Run a single sync cycle
         await extractor.sync_cycle()
@@ -202,9 +203,8 @@ class TestEndToEndSyncCycle:
         db_reader = DatabaseReader(db_path=ha_database_path)
         api_client = CloudApiClient(api_endpoint=mock_url, auth_token="e2e-test-token")
 
-        extractor = EventExtractor()
-        extractor.db_reader = db_reader
-        extractor.api_client = api_client
+        extractor = EventExtractor(db_reader=db_reader, api_client=api_client)
+        extractor.model_manager.api_client = api_client
 
         await extractor.sync_cycle()
         await api_client.close()
@@ -286,3 +286,48 @@ class TestCloudApiClientE2E:
         assert state.received_batches[0]["records"] == records
         assert state.received_batches[0]["source"] == "home_assistant"
         assert "sent_at" in state.received_batches[0]
+
+    @pytest.mark.asyncio
+    async def test_send_batch_auth_header(self, mock_cloud_api):
+        """Verify that CloudApiClient sends the Authorization header."""
+        mock_url, state = mock_cloud_api
+        state.reset()
+
+        client = CloudApiClient(api_endpoint=mock_url, auth_token="auth-test-token")
+        await client.send_batch([{"id": 1, "type": "state", "timestamp": "2024-01-15T12:00:00+00:00",
+                                   "raw_timestamp": 1705320000.0, "entity_id": "light.test",
+                                   "event_type": "state_changed", "state": "on",
+                                   "attributes": {}, "origin": "local"}])
+        await client.close()
+
+        assert any(h == "Bearer auth-test-token" for h in state.received_auth_headers)
+
+
+@pytest.mark.integration
+class TestErrorScenarios:
+    """E2E tests for error scenarios."""
+
+    @pytest.mark.asyncio
+    @patch("main.RETRY_DELAY_SECONDS", 0)
+    async def test_sync_cycle_handles_api_500(self, ha_db, mock_cloud_api):
+        """sync_cycle() handles a 500 from the API gracefully (no crash)."""
+        mock_url, state = mock_cloud_api
+        state.reset()
+        state.checkpoint_timestamp = 0.0
+        state.force_error_status = 500
+
+        db_reader = DatabaseReader(db_path=ha_db)
+        api_client = CloudApiClient(api_endpoint=mock_url, auth_token="e2e-test-token")
+
+        extractor = EventExtractor(db_reader=db_reader, api_client=api_client)
+        extractor.model_manager.api_client = api_client
+
+        # Should not raise — errors are handled gracefully
+        await extractor.sync_cycle()
+        await api_client.close()
+
+        # Checkpoint was fetched successfully
+        assert state.checkpoint_calls >= 1
+
+        # No batches should have been accepted (all returned 500)
+        assert len(state.received_batches) == 0

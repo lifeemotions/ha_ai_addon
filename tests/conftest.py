@@ -270,6 +270,8 @@ class MockCloudApiState:
         self.config_calls: int = 0
         self.checkpoint_timestamp: float = 0.0
         self.config_response: dict = {}
+        self.received_auth_headers: list[str | None] = []
+        self.force_error_status: int | None = None
 
     def reset(self):
         self.received_batches.clear()
@@ -277,6 +279,8 @@ class MockCloudApiState:
         self.config_calls = 0
         self.checkpoint_timestamp = 0.0
         self.config_response = {}
+        self.received_auth_headers.clear()
+        self.force_error_status = None
 
 
 def _create_mock_cloud_app(state: MockCloudApiState) -> web.Application:
@@ -285,10 +289,17 @@ def _create_mock_cloud_app(state: MockCloudApiState) -> web.Application:
     async def handle_get_data(request: web.Request) -> web.Response:
         """GET /ha/data — return checkpoint timestamp."""
         state.checkpoint_calls += 1
+        state.received_auth_headers.append(request.headers.get("Authorization"))
         return web.json_response({"last_timestamp": state.checkpoint_timestamp})
 
     async def handle_post_data(request: web.Request) -> web.Response:
         """POST /ha/data — accept a batch of records."""
+        state.received_auth_headers.append(request.headers.get("Authorization"))
+        if state.force_error_status is not None:
+            return web.json_response(
+                {"error": "forced error"},
+                status=state.force_error_status,
+            )
         body = await request.json()
         state.received_batches.append(body)
         records = body.get("records", [])
@@ -300,6 +311,7 @@ def _create_mock_cloud_app(state: MockCloudApiState) -> web.Application:
     async def handle_get_config(request: web.Request) -> web.Response:
         """GET /ha/config — return remote config."""
         state.config_calls += 1
+        state.received_auth_headers.append(request.headers.get("Authorization"))
         return web.json_response(state.config_response)
 
     app = web.Application()

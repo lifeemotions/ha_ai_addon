@@ -38,11 +38,12 @@
 └─────────────────────────────────────────────────────────────┘
                            │
                            ▼
-                   ┌───────────────┐
-                   │   Cloud API   │
-                   │ POST /events  │
-                   │ GET /checkpoint│
-                   └───────────────┘
+                   ┌────────────────┐
+                   │   Cloud API    │
+                   │ GET /ha/data   │
+                   │ POST /ha/data  │
+                   │ GET /ha/config │
+                   └────────────────┘
 ```
 
 ## Repository Structure

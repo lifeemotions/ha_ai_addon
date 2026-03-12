@@ -710,10 +710,10 @@ class ModelManager:
 class EventExtractor:
     """Main orchestrator for the event extraction process."""
 
-    def __init__(self):
-        self.db_reader = DatabaseReader()
-        self.api_client = CloudApiClient()
-        self.model_manager = ModelManager(self.api_client)
+    def __init__(self, db_reader=None, api_client=None, model_manager=None):
+        self.db_reader = db_reader or DatabaseReader()
+        self.api_client = api_client or CloudApiClient()
+        self.model_manager = model_manager or ModelManager(self.api_client)
         self.running = True
         self.config: Optional[dict[str, Any]] = None
         self._last_config_refresh: float = 0.0
