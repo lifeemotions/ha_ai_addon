@@ -5,10 +5,12 @@ import json
 import sqlite3
 import tempfile
 import threading
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import requests
 from aiohttp import web
 
 
@@ -189,6 +191,71 @@ def sample_state_records():
             "origin": "local",
         },
     ]
+
+
+# ---------------------------------------------------------------------------
+# Shared Docker fixtures (pytest-docker, used by HA Docker & E2E tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def docker_compose_file():
+    """Point pytest-docker at the HA-specific compose file."""
+    return str(Path(__file__).parent / "docker-compose.ha.yml")
+
+
+def is_ha_responsive(url: str) -> bool:
+    """Check whether HA has finished starting and is ready for onboarding."""
+    try:
+        resp = requests.get(f"{url}/api/onboarding", timeout=5)
+        return resp.status_code == 200
+    except (requests.ConnectionError, requests.Timeout):
+        return False
+
+
+@pytest.fixture(scope="session")
+def ha_base_url(docker_ip, docker_services):
+    """Wait for HA to be responsive and return its base URL."""
+    port = docker_services.port_for("homeassistant", 8123)
+    url = f"http://{docker_ip}:{port}"
+    docker_services.wait_until_responsive(
+        timeout=120.0,
+        pause=3.0,
+        check=lambda: is_ha_responsive(url),
+    )
+    return url
+
+
+@pytest.fixture(scope="session")
+def ha_access_token(ha_base_url):
+    """Complete onboarding programmatically and return an access token."""
+    # Step 1 – create the owner account
+    resp = requests.post(
+        f"{ha_base_url}/api/onboarding/users",
+        json={
+            "client_id": f"{ha_base_url}/",
+            "name": "Test Admin",
+            "username": "admin",
+            "password": "testpassword123",
+            "language": "en",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    auth_code = resp.json()["auth_code"]
+
+    # Step 2 – exchange auth code for tokens
+    resp = requests.post(
+        f"{ha_base_url}/auth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": auth_code,
+            "client_id": f"{ha_base_url}/",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
 
 
 # ---------------------------------------------------------------------------

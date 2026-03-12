@@ -25,7 +25,7 @@ ADDON_SLUG = "local_lifeemotions_ai_addon"
 
 @pytest.fixture(scope="session")
 def docker_compose_file():
-    """Point pytest-docker at our HA Supervisor compose file."""
+    """Point pytest-docker at our HA Supervisor compose file (overrides conftest.py)."""
     return str(Path(__file__).parent / "docker-compose.ha-supervisor.yml")
 
 
