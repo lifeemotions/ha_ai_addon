@@ -143,7 +143,7 @@ class TestLocalAddonRepository:
 
         # Verify basic add-on metadata
         assert "name: Life Emotions AI" in result.stdout
-        assert "version_latest: 1.0.0" in result.stdout
+        assert "version_latest: 1.0.1" in result.stdout
         assert "amd64" in result.stdout or "aarch64" in result.stdout
 
 
@@ -173,7 +173,7 @@ class TestAddonInstallation:
         assert result.returncode == 0, f"CLI failed: {result.stderr}"
 
         # Verify the add-on is installed (has a version, not just version_latest)
-        assert "version: 1.0.0" in result.stdout, (
+        assert "version: 1.0.1" in result.stdout, (
             f"Add-on version not found - may not be installed:\n{result.stdout}"
         )
 
@@ -203,8 +203,15 @@ class TestAddonConfiguration:
 
         # Check for our configuration options
         assert "cloud_auth_token" in result.stdout
-        assert "sync_interval_minutes" in result.stdout
-        assert "batch_size" in result.stdout
+
+    def test_addon_options_no_longer_include_removed_fields(self, supervisor_ready):
+        """sync_interval_minutes and batch_size should not be in config options."""
+        container_name = supervisor_ready
+        result = run_hassio_cli(container_name, f"addon info {ADDON_SLUG}")
+        assert result.returncode == 0, f"CLI failed: {result.stderr}"
+
+        assert "sync_interval_minutes" not in result.stdout
+        assert "batch_size" not in result.stdout
 
     def test_addon_requires_correct_ha_version(self, supervisor_ready):
         """The add-on should require HA 2023.4.0 or later."""
@@ -214,3 +221,30 @@ class TestAddonConfiguration:
 
         # Check for minimum HA version requirement
         assert "homeassistant: 2023.4.0" in result.stdout
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+class TestAddonStartup:
+    """Test that the add-on starts and logs expected output."""
+
+    def test_addon_starts_and_logs_no_token(self, supervisor_ready):
+        """Starting the addon with no token should log an auth error and exit."""
+        container_name = supervisor_ready
+
+        # Start the add-on (default config has empty cloud_auth_token)
+        result = run_hassio_cli(container_name, f"addon start {ADDON_SLUG}", timeout=60)
+        assert result.returncode == 0 or "Command completed successfully" in result.stdout, (
+            f"Start failed: {result.stderr}\n{result.stdout}"
+        )
+
+        # Wait for the add-on to start and produce logs
+        time.sleep(15)
+
+        # Check the logs for the expected "no token" message
+        result = run_hassio_cli(container_name, f"addon logs {ADDON_SLUG}", timeout=30)
+        assert result.returncode == 0, f"Logs failed: {result.stderr}"
+
+        assert "No authentication token configured" in result.stdout, (
+            f"Expected 'no token' log message not found:\n{result.stdout[:2000]}"
+        )
