@@ -1,0 +1,45 @@
+name: Check version bump
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if production code changed without version bump
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          # Get list of changed files
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          # Check if any production code changed (files under lifeemotions_ai_addon/, excluding docs)
+          PROD_CHANGES=$(echo "$CHANGED_FILES" | grep '^lifeemotions_ai_addon/' | grep -v '\.md$' || true)
+
+          if [ -z "$PROD_CHANGES" ]; then
+            echo "No production code changes. Version bump not required."
+            exit 0
+          fi
+
+          echo "Production code changes detected:"
+          echo "$PROD_CHANGES"
+
+          # Check if config.yaml version was changed
+          VERSION_CHANGED=$(git diff "$BASE_SHA" "$HEAD_SHA" -- lifeemotions_ai_addon/config.yaml | grep '^[+-]version:' || true)
+
+          if [ -z "$VERSION_CHANGED" ]; then
+            echo ""
+            echo "::error::Production code changed without version bump in lifeemotions_ai_addon/config.yaml. HA Supervisor uses this version to detect updates — without a bump, different users will get different code for the same version."
+            exit 1
+          fi
+
+          echo ""
+          echo "Version bump detected:"
+          echo "$VERSION_CHANGED"
