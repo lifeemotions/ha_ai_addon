@@ -201,6 +201,30 @@ These tests:
 - Integration tests marked with `@pytest.mark.integration`
 - Slow tests marked with `@pytest.mark.slow`
 
+## Development & Release Workflow
+
+**Branch protection is enabled on `main`. All changes must go through a PR.**
+
+### Version Management
+
+HA Supervisor uses the `version` field in `lifeemotions_ai_addon/config.yaml` to detect updates and rebuild the container. The same version must always produce the same code — pushing different code under the same version breaks reproducibility.
+
+**Rules:**
+- NEVER push code changes directly to `main`
+- Work on a feature/fix branch
+- If the PR modifies any file under `lifeemotions_ai_addon/` (except `*.md`), bump the `version` in `config.yaml` as part of the PR
+- Test changes (under `tests/`) and documentation do NOT require a version bump
+- Copilot review (`.github/copilot-instructions.md`) will flag PRs that violate this
+
+### Full Development Process
+
+1. Create a branch from `main` (e.g. `feat/my-feature` or `fix/my-bug`)
+2. Make changes, write tests
+3. Run unit tests: `.venv/bin/python -m pytest tests/ -v --ignore=tests/test_integration_addon_install.py --ignore=tests/test_integration_ha_docker.py --ignore=tests/test_integration_e2e.py`
+4. If production code changed, bump `version` in `lifeemotions_ai_addon/config.yaml`
+5. Push branch, open PR to `main`
+6. After merge, update the submodule pointer in the parent repo (`le_ha`) and push
+
 ## Bug Fixing Workflow
 
 1. **Reproduce first**: Write a failing test that demonstrates the bug before touching any production code.
