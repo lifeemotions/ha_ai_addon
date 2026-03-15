@@ -21,13 +21,16 @@ COPY requirements.txt /tmp/
 RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 # Copy application files
+COPY run.sh /
 COPY const.py /app/
 COPY main.py /app/
 COPY ha_api.py /app/
 
-# Copy run script into s6-overlay service directory
-COPY run.sh /etc/services.d/lifeemotions/run
-RUN chmod a+x /etc/services.d/lifeemotions/run
-
 # Set working directory
 WORKDIR /app
+
+# Make run script executable
+RUN chmod a+x /run.sh
+
+# Set entrypoint
+CMD [ "/run.sh" ]

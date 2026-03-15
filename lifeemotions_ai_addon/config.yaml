@@ -1,6 +1,6 @@
 # Home Assistant Add-on Configuration
 name: "Life Emotions AI"
-version: "1.0.2"
+version: "1.0.3"
 slug: "lifeemotions_ai_addon"
 description: "Extracts historical device events from Home Assistant, streams them to a remote Cloud API and manages a local AI model"
 url: "https://github.com/lifeemotions/ha_ai_addon"
@@ -34,6 +34,9 @@ schema:
 # Startup configuration
 startup: application
 boot: auto
+
+# Disable Docker init so s6-overlay can run as PID 1
+init: false
 
 # Resource constraints
 timeout: 60
