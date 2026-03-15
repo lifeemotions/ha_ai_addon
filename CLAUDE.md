@@ -214,7 +214,7 @@ HA Supervisor uses the `version` field in `lifeemotions_ai_addon/config.yaml` to
 - Work on a feature/fix branch
 - If the PR modifies any file under `lifeemotions_ai_addon/` (except `*.md`), bump the `version` in `config.yaml` as part of the PR
 - Test changes (under `tests/`) and documentation do NOT require a version bump
-- Copilot review (`.github/copilot-instructions.md`) will flag PRs that violate this
+- A GitHub Action (`.github/workflows/check-version-bump.yml`) will block PRs that violate this
 
 ### Full Development Process
 
@@ -223,7 +223,8 @@ HA Supervisor uses the `version` field in `lifeemotions_ai_addon/config.yaml` to
 3. Run unit tests: `.venv/bin/python -m pytest tests/ -v --ignore=tests/test_integration_addon_install.py --ignore=tests/test_integration_ha_docker.py --ignore=tests/test_integration_e2e.py`
 4. If production code changed, bump `version` in `lifeemotions_ai_addon/config.yaml`
 5. Push branch, open PR to `main`
-6. After merge, update the submodule pointer in the parent repo (`le_ha`) and push
+6. PR test plans must only contain items that require manual verification — do not add items like "CI should pass" or "verify workflow runs" that are automatically checked
+7. After merge, update the submodule pointer in the parent repo (`le_ha`) and push
 
 ## Bug Fixing Workflow
 
