@@ -203,8 +203,6 @@ class TestAddonConfiguration:
 
         # Check for our configuration options
         assert "cloud_auth_token" in result.stdout
-        assert "sync_interval_minutes" in result.stdout
-        assert "batch_size" in result.stdout
 
     def test_addon_requires_correct_ha_version(self, supervisor_ready):
         """The add-on should require HA 2023.4.0 or later."""

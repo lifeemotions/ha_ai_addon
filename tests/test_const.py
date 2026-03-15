@@ -71,13 +71,9 @@ class TestConstantsDefaults:
         from const import API_ENDPOINT
         assert API_ENDPOINT == "https://api.life-emotions.com/ha"
 
-    def test_default_sync_interval(self):
-        from const import DEFAULT_SYNC_INTERVAL_MINUTES
-        assert DEFAULT_SYNC_INTERVAL_MINUTES == 5
-
-    def test_default_batch_size(self):
-        from const import DEFAULT_BATCH_SIZE
-        assert DEFAULT_BATCH_SIZE == 100
+    def test_heartbeat_interval(self):
+        from const import HEARTBEAT_INTERVAL_SECONDS
+        assert HEARTBEAT_INTERVAL_SECONDS == 300
 
     def test_request_timeout(self):
         from const import REQUEST_TIMEOUT_SECONDS

@@ -29,13 +29,8 @@ def _parse_int_env(name: str, default: int) -> int:
         return default
 
 
-# Sync configuration
-DEFAULT_SYNC_INTERVAL_MINUTES = 5
-SYNC_INTERVAL_MINUTES = _parse_int_env("SYNC_INTERVAL_MINUTES", DEFAULT_SYNC_INTERVAL_MINUTES)
-
-# Batch configuration
-DEFAULT_BATCH_SIZE = 100
-BATCH_SIZE = _parse_int_env("BATCH_SIZE", DEFAULT_BATCH_SIZE)
+# Heartbeat interval (fixed, not configurable)
+HEARTBEAT_INTERVAL_SECONDS = 300
 
 # Request configuration
 REQUEST_TIMEOUT_SECONDS = 30
