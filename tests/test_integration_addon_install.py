@@ -143,7 +143,7 @@ class TestLocalAddonRepository:
 
         # Verify basic add-on metadata
         assert "name: Life Emotions AI" in result.stdout
-        assert "version_latest: 1.0.1" in result.stdout
+        assert "version_latest: 1.0.2" in result.stdout
         assert "amd64" in result.stdout or "aarch64" in result.stdout
 
 
@@ -173,7 +173,7 @@ class TestAddonInstallation:
         assert result.returncode == 0, f"CLI failed: {result.stderr}"
 
         # Verify the add-on is installed (has a version, not just version_latest)
-        assert "version: 1.0.1" in result.stdout, (
+        assert "version: 1.0.2" in result.stdout, (
             f"Add-on version not found - may not be installed:\n{result.stdout}"
         )
 
