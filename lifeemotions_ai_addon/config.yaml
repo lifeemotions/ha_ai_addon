@@ -26,14 +26,10 @@ homeassistant_api: true
 # Add-on options configurable via HA UI
 options:
   cloud_auth_token: ""
-  sync_interval_minutes: 5
-  batch_size: 100
 
 # Schema for options validation
 schema:
   cloud_auth_token: str
-  sync_interval_minutes: int(1,1440)
-  batch_size: int(10,1000)
 
 # Startup configuration
 startup: application

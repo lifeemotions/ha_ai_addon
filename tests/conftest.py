@@ -268,8 +268,11 @@ class MockCloudApiState:
         self.received_batches: list[dict] = []
         self.checkpoint_calls: int = 0
         self.config_calls: int = 0
+        self.verify_calls: int = 0
         self.checkpoint_timestamp: float = 0.0
         self.config_response: dict = {}
+        self.verify_response: dict = {"status": "ok", "sync_interval_minutes": 5, "batch_size": 100}
+        self.verify_status: int = 200
         self.received_auth_headers: list[str | None] = []
         self.force_error_status: int | None = None
 
@@ -277,8 +280,11 @@ class MockCloudApiState:
         self.received_batches.clear()
         self.checkpoint_calls = 0
         self.config_calls = 0
+        self.verify_calls = 0
         self.checkpoint_timestamp = 0.0
         self.config_response = {}
+        self.verify_response = {"status": "ok", "sync_interval_minutes": 5, "batch_size": 100}
+        self.verify_status = 200
         self.received_auth_headers.clear()
         self.force_error_status = None
 
@@ -314,10 +320,17 @@ def _create_mock_cloud_app(state: MockCloudApiState) -> web.Application:
         state.received_auth_headers.append(request.headers.get("Authorization"))
         return web.json_response(state.config_response)
 
+    async def handle_post_verify(request: web.Request) -> web.Response:
+        """POST /ha/verify — verify token and return sync settings."""
+        state.verify_calls += 1
+        state.received_auth_headers.append(request.headers.get("Authorization"))
+        return web.json_response(state.verify_response, status=state.verify_status)
+
     app = web.Application()
     app.router.add_get("/ha/data", handle_get_data)
     app.router.add_post("/ha/data", handle_post_data)
     app.router.add_get("/ha/config", handle_get_config)
+    app.router.add_post("/ha/verify", handle_post_verify)
     return app
 
 

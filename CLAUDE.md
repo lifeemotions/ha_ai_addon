@@ -23,15 +23,16 @@
 │  │  Add-on Container                                   │   │
 │  │  ┌───────────────┐  ┌───────────────────────────┐   │   │
 │  │  │DatabaseReader │  │    CloudApiClient         │   │   │
-│  │  │ fetch_events()│  │ fetch_checkpoint()        │   │   │
-│  │  │ fetch_states()│  │ send_batch()              │   │   │
-│  │  └───────────────┘  └───────────────────────────┘   │   │
-│  │          │                      │                   │   │
+│  │  │ fetch_events()│  │ verify_token()            │   │   │
+│  │  │ fetch_states()│  │ fetch_checkpoint()        │   │   │
+│  │  └───────────────┘  │ send_batch()              │   │   │
+│  │          │           └───────────────────────────┘   │   │
 │  │          └──────┬───────────────┘                   │   │
 │  │                 ▼                                   │   │
 │  │       ┌─────────────────┐                          │   │
 │  │       │ EventExtractor  │                          │   │
-│  │       │ sync_cycle()    │                          │   │
+│  │       │ _heartbeat_loop │                          │   │
+│  │       │ _sync_loop()    │                          │   │
 │  │       │ run()           │                          │   │
 │  │       └─────────────────┘                          │   │
 │  └─────────────────────────────────────────────────────┘   │
@@ -39,11 +40,12 @@
                            │
                            ▼
                    ┌────────────────┐
-                   │   Cloud API    │
-                   │ GET /ha/data   │
-                   │ POST /ha/data  │
-                   │ GET /ha/config │
-                   └────────────────┘
+                   │   Cloud API     │
+                   │ POST /ha/verify │
+                   │ GET /ha/data    │
+                   │ POST /ha/data   │
+                   │ GET /ha/config  │
+                   └─────────────────┘
 ```
 
 ## Repository Structure
@@ -128,7 +130,7 @@ Use the test runner script for convenience:
 
 ```bash
 ./scripts/run_tests.sh          # Run all tests
-./scripts/run_tests.sh unit     # Run only unit tests (175 tests, fast)
+./scripts/run_tests.sh unit     # Run only unit tests (180 tests, fast)
 ./scripts/run_tests.sh ha       # Run only HA Docker integration tests (3 tests)
 ./scripts/run_tests.sh e2e      # Run only E2E integration tests (HA + mock Cloud API)
 ./scripts/run_tests.sh addon    # Run only add-on installation tests (9 tests, ~3 min)
@@ -137,7 +139,7 @@ Use the test runner script for convenience:
 
 Or run directly with pytest:
 
-### Unit Tests (175 tests, fast, no Docker)
+### Unit Tests (180 tests, fast, no Docker)
 ```bash
 .venv/bin/python -m pytest tests/ -v \
     --ignore=tests/test_integration_addon_install.py \
@@ -186,10 +188,10 @@ These tests:
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
 | `test_database_reader.py` | 30 | `DatabaseReader` fetch/parse methods |
-| `test_cloud_api_client.py` | 38 | `CloudApiClient` send/checkpoint/config with retry logic |
-| `test_event_extractor.py` | 29 | `EventExtractor` sync cycle, config refresh, predictions |
+| `test_cloud_api_client.py` | 46 | `CloudApiClient` send/checkpoint/verify/config with retry logic |
+| `test_event_extractor.py` | 34 | `EventExtractor` heartbeat, sync loop, config refresh, predictions |
 | `test_model_manager.py` | 36 | `ModelManager` download, extract, install, predict |
-| `test_const.py` | 42 | Environment variable parsing, constant defaults |
+| `test_const.py` | 15 | Constant defaults |
 | `test_integration_ha_docker.py` | 3 | End-to-end with real HA Core container |
 | `test_integration_e2e.py` | 5 | Full pipeline: HA DB → addon → mock Cloud API |
 | `test_integration_addon_install.py` | 9 | Add-on installation into HA Supervisor |
@@ -209,13 +211,11 @@ These tests:
 
 Configured via HA UI, defined in `lifeemotions_ai_addon/config.yaml`:
 - `cloud_auth_token`: Bearer token for Cloud API authentication
-- `sync_interval_minutes`: How often to sync (1-1440, default 5)
-- `batch_size`: Records per API call (10-1000, default 100)
+
+**Note**: `sync_interval_minutes` and `batch_size` are server-controlled via the `POST /ha/verify` heartbeat response.
 
 ## Environment Variables
 
 All read in `lifeemotions_ai_addon/const.py`:
 - `CLOUD_AUTH_TOKEN`: Bearer token (set by `run.sh` from HA addon options)
-- `SYNC_INTERVAL_MINUTES`: Sync interval in minutes (default 5)
-- `BATCH_SIZE`: Records per API call (default 100)
 - `API_ENDPOINT`: Cloud API base URL (default `https://api.life-emotions.com/ha`). Override for testing, e.g. `http://localhost:8080/ha`

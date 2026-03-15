@@ -23,11 +23,11 @@ import aiohttp
 from ha_api import check_recorder_dialect
 from const import (
     API_ENDPOINT,
-    BATCH_SIZE,
     CLOUD_AUTH_TOKEN,
     CONFIG_FILE_PATH,
     CONFIG_REFRESH_INTERVAL_MINUTES,
     DATABASE_PATH,
+    HEARTBEAT_INTERVAL_SECONDS,
     MAX_RETRIES,
     MODEL_DIR,
     MODEL_DOWNLOAD_TIMEOUT_SECONDS,
@@ -38,7 +38,6 @@ from const import (
     PREDICTION_TIMEOUT_SECONDS,
     REQUEST_TIMEOUT_SECONDS,
     RETRY_DELAY_SECONDS,
-    SYNC_INTERVAL_MINUTES,
 )
 
 # Configure logging for Home Assistant Supervisor log stream
@@ -66,7 +65,7 @@ class DatabaseReader:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def fetch_events(self, after_timestamp: float, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
+    def fetch_events(self, after_timestamp: float, batch_size: int = 100) -> list[dict[str, Any]]:
         """
         Fetch events from the database with time_fired_ts > after_timestamp.
 
@@ -114,7 +113,7 @@ class DatabaseReader:
 
         return events
 
-    def fetch_states(self, after_timestamp: float, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
+    def fetch_states(self, after_timestamp: float, batch_size: int = 100) -> list[dict[str, Any]]:
         """
         Fetch states from the database with last_updated_ts > after_timestamp.
 
@@ -367,6 +366,74 @@ class CloudApiClient:
 
         logger.error(f"Failed to send batch after {MAX_RETRIES} attempts")
         return False
+
+    async def verify_token(self) -> Optional[dict[str, Any]]:
+        """
+        Verify the auth token with the Cloud API via POST /verify.
+
+        Returns {"sync_interval_minutes": N, "batch_size": N} on success,
+        or None on failure.
+        Fail-fast on 401/403/404 (no retry).
+        Retries on 5xx/timeout/network errors.
+        """
+        if not self.auth_token:
+            logger.error("No authentication token configured. Cannot verify.")
+            return None
+
+        headers = {
+            "Authorization": f"Bearer {self.auth_token}",
+        }
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                session = await self._get_session()
+                async with session.post(
+                    f"{self.api_endpoint}/verify",
+                    headers=headers,
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        result = {
+                            "sync_interval_minutes": data["sync_interval_minutes"],
+                            "batch_size": data["batch_size"],
+                        }
+                        logger.info(f"Token verified: sync_interval={result['sync_interval_minutes']}min, batch_size={result['batch_size']}")
+                        return result
+                    elif response.status in (401, 403, 404):
+                        error_text = await response.text()
+                        logger.error(
+                            f"Token verification failed ({response.status}): {error_text}"
+                        )
+                        return None
+                    elif response.status >= 500:
+                        logger.warning(
+                            f"Server error {response.status} verifying token on attempt {attempt}/{MAX_RETRIES}"
+                        )
+                    else:
+                        error_text = await response.text()
+                        logger.error(
+                            f"API error {response.status} verifying token: {error_text}"
+                        )
+                        return None
+
+            except asyncio.TimeoutError:
+                logger.warning(f"Verify request timeout on attempt {attempt}/{MAX_RETRIES}")
+            except aiohttp.ClientError as e:
+                logger.warning(f"Network error verifying token on attempt {attempt}/{MAX_RETRIES}: {e}")
+            except (KeyError, ValueError) as e:
+                logger.error(f"Invalid verify response from API: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Unexpected error verifying token: {e}")
+                return None
+
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+                logger.info(f"Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
+
+        logger.error(f"Failed to verify token after {MAX_RETRIES} attempts")
+        return None
 
     async def fetch_config(self) -> Optional[dict[str, Any]]:
         """
@@ -717,16 +784,21 @@ class EventExtractor:
         self.running = True
         self.config: Optional[dict[str, Any]] = None
         self._last_config_refresh: float = 0.0
+        self.sync_interval_minutes: Optional[int] = None
+        self.batch_size: Optional[int] = None
+        self.verified: bool = False
 
     async def run(self) -> None:
-        """Main run loop."""
+        """Main run loop with two-loop architecture: heartbeat + sync."""
         logger.info("Life Emotions AI started")
         logger.info(f"Database path: {DATABASE_PATH}")
         logger.info(f"API endpoint: {API_ENDPOINT}")
-        logger.info(f"Sync interval: {SYNC_INTERVAL_MINUTES} minutes")
-        logger.info(f"Batch size: {BATCH_SIZE}")
         token_status = f"***{CLOUD_AUTH_TOKEN[-4:]}" if len(CLOUD_AUTH_TOKEN) > 4 else ("set (short)" if CLOUD_AUTH_TOKEN else "NOT SET")
         logger.info(f"Auth token: {token_status}")
+
+        if not CLOUD_AUTH_TOKEN or not CLOUD_AUTH_TOKEN.strip():
+            logger.error("No authentication token configured. Exiting.")
+            return
 
         # Verify Recorder is using SQLite
         dialect = await check_recorder_dialect()
@@ -745,40 +817,77 @@ class EventExtractor:
             logger.error("Recorder may not be using SQLite, or the database has not been created yet")
             return
 
-        # Fetch remote config on startup
-        await self._refresh_config()
-
         try:
-            while self.running:
-                # Refresh config periodically
-                elapsed = asyncio.get_event_loop().time() - self._last_config_refresh
-                if elapsed >= CONFIG_REFRESH_INTERVAL_MINUTES * 60:
-                    await self._refresh_config()
-
-                try:
-                    await self.sync_cycle()
-                except Exception as e:
-                    logger.error(f"Error in sync cycle: {e}")
-
-                # Check and run prediction if scheduled
-                if self.config:
-                    schedule = self.config.get("prediction_schedule", "")
-                    if self.model_manager.should_run_prediction(schedule):
-                        try:
-                            await self.model_manager.run_prediction()
-                        except Exception as e:
-                            logger.error(f"Error running prediction: {e}")
-
-                if not self.running:
-                    break
-
-                logger.info(f"Sleeping for {SYNC_INTERVAL_MINUTES} minutes...")
-                try:
-                    await asyncio.sleep(SYNC_INTERVAL_MINUTES * 60)
-                except asyncio.CancelledError:
-                    break
+            await asyncio.gather(
+                self._heartbeat_loop(),
+                self._sync_loop(),
+            )
         finally:
             await self.api_client.close()
+
+    async def _heartbeat_loop(self) -> None:
+        """Periodically verify the auth token and update sync settings."""
+        while self.running:
+            try:
+                result = await self.api_client.verify_token()
+                if result is not None:
+                    self.sync_interval_minutes = result["sync_interval_minutes"]
+                    self.batch_size = result["batch_size"]
+                    self.verified = True
+                    logger.info(f"Heartbeat OK: sync_interval={self.sync_interval_minutes}min, batch_size={self.batch_size}")
+                else:
+                    self.verified = False
+                    logger.warning("Heartbeat failed: token verification unsuccessful")
+            except Exception as e:
+                self.verified = False
+                logger.error(f"Error in heartbeat: {e}")
+
+            if not self.running:
+                break
+
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                break
+
+    async def _sync_loop(self) -> None:
+        """Sync loop that waits for verification before syncing."""
+        while self.running:
+            if not self.verified:
+                logger.info("Waiting for successful heartbeat before syncing...")
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break
+                continue
+
+            # Refresh config periodically
+            elapsed = asyncio.get_event_loop().time() - self._last_config_refresh
+            if elapsed >= CONFIG_REFRESH_INTERVAL_MINUTES * 60:
+                await self._refresh_config()
+
+            try:
+                await self.sync_cycle()
+            except Exception as e:
+                logger.error(f"Error in sync cycle: {e}")
+
+            # Check and run prediction if scheduled
+            if self.config:
+                schedule = self.config.get("prediction_schedule", "")
+                if self.model_manager.should_run_prediction(schedule):
+                    try:
+                        await self.model_manager.run_prediction()
+                    except Exception as e:
+                        logger.error(f"Error running prediction: {e}")
+
+            if not self.running:
+                break
+
+            logger.info(f"Sleeping for {self.sync_interval_minutes} minutes...")
+            try:
+                await asyncio.sleep(self.sync_interval_minutes * 60)
+            except asyncio.CancelledError:
+                break
 
     def _load_local_config(self) -> Optional[dict[str, Any]]:
         """Load config from local JSON file."""
@@ -841,9 +950,10 @@ class EventExtractor:
     async def _process_events(self, after_timestamp: float) -> float:
         """Process events in batches. Returns the latest processed timestamp."""
         current_timestamp = after_timestamp
+        batch_size = self.batch_size
 
         while True:
-            events = self.db_reader.fetch_events(current_timestamp, BATCH_SIZE)
+            events = self.db_reader.fetch_events(current_timestamp, batch_size)
 
             if not events:
                 logger.info("No new events to process")
@@ -859,7 +969,7 @@ class EventExtractor:
                 break
 
             # If we got fewer than batch_size, we've reached the end
-            if len(events) < BATCH_SIZE:
+            if len(events) < batch_size:
                 break
 
         return current_timestamp
@@ -867,9 +977,10 @@ class EventExtractor:
     async def _process_states(self, after_timestamp: float) -> float:
         """Process states in batches. Returns the latest processed timestamp."""
         current_timestamp = after_timestamp
+        batch_size = self.batch_size
 
         while True:
-            states = self.db_reader.fetch_states(current_timestamp, BATCH_SIZE)
+            states = self.db_reader.fetch_states(current_timestamp, batch_size)
 
             if not states:
                 logger.info("No new states to process")
@@ -885,7 +996,7 @@ class EventExtractor:
                 break
 
             # If we got fewer than batch_size, we've reached the end
-            if len(states) < BATCH_SIZE:
+            if len(states) < batch_size:
                 break
 
         return current_timestamp
