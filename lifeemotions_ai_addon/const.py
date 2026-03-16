@@ -6,7 +6,7 @@ import os
 logger = logging.getLogger("lifeemotions_ai_addon")
 
 # Database configuration
-DATABASE_PATH = "/config/home-assistant_v2.db"
+DATABASE_PATH = "/homeassistant/home-assistant_v2.db"
 
 # API configuration
 API_ENDPOINT = os.environ.get("API_ENDPOINT", "https://api.life-emotions.com/ha")
