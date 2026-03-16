@@ -852,14 +852,19 @@ class EventExtractor:
 
     async def _sync_loop(self) -> None:
         """Sync loop that waits for verification before syncing."""
+        _logged_waiting = False
         while self.running:
             if not self.verified:
-                logger.info("Waiting for successful heartbeat before syncing...")
+                if not _logged_waiting:
+                    logger.info("Waiting for successful heartbeat before syncing...")
+                    _logged_waiting = True
                 try:
                     await asyncio.sleep(5)
                 except asyncio.CancelledError:
                     break
                 continue
+
+            _logged_waiting = False
 
             # Refresh config periodically
             elapsed = asyncio.get_event_loop().time() - self._last_config_refresh
