@@ -35,7 +35,7 @@ class TestConstantsDefaults:
 
     def test_database_path(self):
         from const import DATABASE_PATH
-        assert DATABASE_PATH == "/config/home-assistant_v2.db"
+        assert DATABASE_PATH == "/homeassistant/home-assistant_v2.db"
 
     def test_config_file_path(self):
         from const import CONFIG_FILE_PATH

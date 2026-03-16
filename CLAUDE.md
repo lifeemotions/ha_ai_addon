@@ -12,7 +12,7 @@
 ┌─────────────────────────────────────────────────────────────┐
 │                    Home Assistant                           │
 │  ┌─────────────────────────────────────────────────────┐   │
-│  │  SQLite DB: /config/home-assistant_v2.db            │   │
+│  │  SQLite DB: /homeassistant/home-assistant_v2.db            │   │
 │  │  - events table (event_type_id → event_types)       │   │
 │  │  - states table (metadata_id → states_meta)         │   │
 │  │  - event_data, state_attributes (shared JSON)       │   │
