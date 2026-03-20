@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CMD=$(jq -r '.tool_input.command // empty') && echo \"$CMD\" | grep -q 'git commit' || exit 0 && REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && echo \"$REPO_ROOT\" | grep -q 'ha_ai_addon' || exit 0 && PROD_FILES=$(git diff --cached --name-only -- 'lifeemotions_ai_addon/' | grep -v '\\.md$') && [ -z \"$PROD_FILES\" ] && exit 0; if ! git diff --cached -- lifeemotions_ai_addon/config.yaml | grep -q '^+version:'; then echo '{\"decision\":\"block\",\"reason\":\"BLOCKED: Production files changed under lifeemotions_ai_addon/ but version in config.yaml was not bumped. Bump the version first (see CLAUDE.md).\"}'; fi",
+            "timeout": 10,
+            "statusMessage": "Checking version bump..."
+          }
+        ]
+      }
+    ]
+  }
+}
