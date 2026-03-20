@@ -1,6 +1,6 @@
 # Home Assistant Add-on Configuration
 name: "Life Emotions AI"
-version: "1.0.5"
+version: "1.0.6"
 slug: "lifeemotions_ai_addon"
 description: "Extracts historical device events from Home Assistant, streams them to a remote Cloud API and manages a local AI model"
 url: "https://github.com/lifeemotions/ha_ai_addon"
