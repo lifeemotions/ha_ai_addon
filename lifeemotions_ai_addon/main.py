@@ -244,11 +244,12 @@ class CloudApiClient:
             await self._session.close()
             self._session = None
 
-    async def fetch_checkpoint(self) -> Optional[float]:
+    async def fetch_checkpoint(self) -> Optional[dict[str, float]]:
         """
-        Fetch the checkpoint timestamp from the Cloud API.
+        Fetch checkpoint timestamps from the Cloud API.
 
-        Returns the last_timestamp (Unix float) on success, or None on failure.
+        Returns a dict with 'event' and 'state' cursor timestamps,
+        or None on failure.
         """
         if not self.auth_token:
             logger.error("No authentication token configured. Cannot fetch checkpoint.")
@@ -267,14 +268,25 @@ class CloudApiClient:
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
+
+                        # New format: separate cursors per type
+                        event_ts = data.get("last_event_timestamp")
+                        state_ts = data.get("last_state_timestamp")
+
+                        if event_ts is not None and state_ts is not None:
+                            result = {"event": float(event_ts), "state": float(state_ts)}
+                            logger.info(f"Fetched checkpoint from API: event={result['event']}, state={result['state']}")
+                            return result
+
+                        # Fallback: old server returning only last_timestamp
                         last_ts = data.get("last_timestamp")
                         if last_ts is not None:
-                            last_ts = float(last_ts)
-                            logger.info(f"Fetched checkpoint from API: last_timestamp={last_ts}")
-                            return last_ts
-                        else:
-                            logger.error("API response missing 'last_timestamp' field")
-                            return None
+                            ts = float(last_ts)
+                            logger.info(f"Fetched checkpoint from API (legacy): last_timestamp={ts}")
+                            return {"event": ts, "state": ts}
+
+                        logger.error("API response missing checkpoint fields")
+                        return None
                     elif response.status == 429:
                         retry_after = int(response.headers.get("Retry-After", RETRY_DELAY_SECONDS))
                         logger.warning(
@@ -966,19 +978,18 @@ class EventExtractor:
 
     async def sync_cycle(self) -> None:
         """Perform one sync cycle: fetch checkpoint from API, then fetch and send data."""
-        last_timestamp = await self.api_client.fetch_checkpoint()
+        checkpoints = await self.api_client.fetch_checkpoint()
 
-        if last_timestamp is None:
+        if checkpoints is None:
             logger.warning("Could not fetch checkpoint from API, skipping sync cycle")
             return
 
-        logger.info(f"Starting sync cycle from timestamp={last_timestamp}")
+        logger.info(f"Starting sync cycle: event_ts={checkpoints['event']}, state_ts={checkpoints['state']}")
 
-        # Process events
-        await self._process_events(last_timestamp)
+        # Process events and states with independent cursors
+        await self._process_events(checkpoints["event"])
 
-        # Process states
-        await self._process_states(last_timestamp)
+        await self._process_states(checkpoints["state"])
 
     async def _process_events(self, after_timestamp: float) -> float:
         """Process events in batches. Returns the latest processed timestamp."""

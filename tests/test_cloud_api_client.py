@@ -334,20 +334,24 @@ class TestFetchCheckpoint:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_successful_fetch(self):
+    async def test_successful_fetch_with_separate_cursors(self):
         client = CloudApiClient(
             api_endpoint="https://api.test.com/ingest",
             auth_token="test-token",
         )
 
         mock_session = _make_mock_session(
-            {"status": 200, "json": {"last_timestamp": 1705320000.0}},
+            {"status": 200, "json": {
+                "last_timestamp": 1705320000.0,
+                "last_event_timestamp": 1705320000.0,
+                "last_state_timestamp": 1705319000.0,
+            }},
             method="get",
         )
         client._get_session = AsyncMock(return_value=mock_session)
 
         result = await client.fetch_checkpoint()
-        assert result == 1705320000.0
+        assert result == {"event": 1705320000.0, "state": 1705319000.0}
 
         # Verify correct URL and auth header
         call_args = mock_session.get.call_args
@@ -362,17 +366,21 @@ class TestFetchCheckpoint:
         )
 
         mock_session = _make_mock_session(
-            {"status": 200, "json": {"last_timestamp": 0.0}},
+            {"status": 200, "json": {
+                "last_timestamp": 0.0,
+                "last_event_timestamp": 0.0,
+                "last_state_timestamp": 0.0,
+            }},
             method="get",
         )
         client._get_session = AsyncMock(return_value=mock_session)
 
         result = await client.fetch_checkpoint()
-        assert result == 0.0
+        assert result == {"event": 0.0, "state": 0.0}
 
     @pytest.mark.asyncio
-    async def test_successful_fetch_integer_timestamp(self):
-        """API might return integer instead of float."""
+    async def test_fallback_to_legacy_last_timestamp(self):
+        """Old server returning only last_timestamp should work."""
         client = CloudApiClient(
             api_endpoint="https://api.test.com/ingest",
             auth_token="test-token",
@@ -385,8 +393,7 @@ class TestFetchCheckpoint:
         client._get_session = AsyncMock(return_value=mock_session)
 
         result = await client.fetch_checkpoint()
-        assert result == 1705320000.0
-        assert isinstance(result, float)
+        assert result == {"event": 1705320000.0, "state": 1705320000.0}
 
     @pytest.mark.asyncio
     async def test_missing_last_timestamp_returns_none(self):
@@ -501,7 +508,11 @@ class TestFetchCheckpoint:
         mock_session = _make_mock_session(
             [
                 {"status": 503},
-                {"status": 200, "json": {"last_timestamp": 1705320000.0}},
+                {"status": 200, "json": {
+                    "last_timestamp": 1705320000.0,
+                    "last_event_timestamp": 1705320000.0,
+                    "last_state_timestamp": 1705320000.0,
+                }},
             ],
             method="get",
         )
@@ -510,7 +521,7 @@ class TestFetchCheckpoint:
         with patch("main.asyncio.sleep", new_callable=AsyncMock):
             result = await client.fetch_checkpoint()
 
-        assert result == 1705320000.0
+        assert result == {"event": 1705320000.0, "state": 1705320000.0}
         assert mock_session.get.call_count == 2
 
     @pytest.mark.asyncio
@@ -834,7 +845,11 @@ class TestRateLimitHandling:
         mock_session = _make_mock_session(
             [
                 {"status": 429, "headers": {"Retry-After": "5"}},
-                {"status": 200, "json": {"last_timestamp": 1234.5}},
+                {"status": 200, "json": {
+                    "last_timestamp": 1234.5,
+                    "last_event_timestamp": 1234.5,
+                    "last_state_timestamp": 1234.5,
+                }},
             ],
             method="get",
         )
@@ -843,7 +858,7 @@ class TestRateLimitHandling:
         with patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             result = await client.fetch_checkpoint()
 
-        assert result == 1234.5
+        assert result == {"event": 1234.5, "state": 1234.5}
         assert mock_session.get.call_count == 2
         mock_sleep.assert_any_call(5)
 
@@ -924,7 +939,11 @@ class TestRateLimitHandling:
         mock_session = _make_mock_session(
             [
                 {"status": 429, "headers": {}},
-                {"status": 200, "json": {"last_timestamp": 99.0}},
+                {"status": 200, "json": {
+                    "last_timestamp": 99.0,
+                    "last_event_timestamp": 99.0,
+                    "last_state_timestamp": 99.0,
+                }},
             ],
             method="get",
         )
@@ -933,6 +952,6 @@ class TestRateLimitHandling:
         with patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             result = await client.fetch_checkpoint()
 
-        assert result == 99.0
+        assert result == {"event": 99.0, "state": 99.0}
         # Should use RETRY_DELAY_SECONDS (5) as default
         mock_sleep.assert_any_call(5)

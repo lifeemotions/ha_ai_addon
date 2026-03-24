@@ -296,7 +296,11 @@ def _create_mock_cloud_app(state: MockCloudApiState) -> web.Application:
         """GET /ha/data — return checkpoint timestamp."""
         state.checkpoint_calls += 1
         state.received_auth_headers.append(request.headers.get("Authorization"))
-        return web.json_response({"last_timestamp": state.checkpoint_timestamp})
+        return web.json_response({
+            "last_timestamp": state.checkpoint_timestamp,
+            "last_event_timestamp": state.checkpoint_timestamp,
+            "last_state_timestamp": state.checkpoint_timestamp,
+        })
 
     async def handle_post_data(request: web.Request) -> web.Response:
         """POST /ha/data — accept a batch of records."""
