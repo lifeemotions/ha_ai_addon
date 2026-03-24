@@ -1,0 +1,7 @@
+-r lifeemotions_ai_addon/requirements.txt
+pytest
+pytest-asyncio
+pytest-docker
+aiohttp
+aioresponses
+requests

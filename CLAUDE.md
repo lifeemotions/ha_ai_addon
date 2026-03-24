@@ -6,6 +6,10 @@
 
 **Requires Home Assistant 2023.4+** (enforced via `config.yaml`). Only supports the modern database schema where event types are in a separate `event_types` table.
 
+## General Rules
+
+- NEVER install a package without ensuring it is tracked in the proper requirements file. This includes test dependencies — they go in `requirements-test.txt`. A fresh dev environment must be able to run all tests without hitting missing module errors.
+
 ## Architecture
 
 ```
@@ -123,6 +127,15 @@ WHERE s.last_updated_ts > ?
 - Python version: 3.14.2
 - Virtual environment: `.venv/` (activate with `source .venv/bin/activate`)
 - Run Python: `.venv/bin/python`
+
+### Setup from scratch
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements-test.txt
+```
+
+- `lifeemotions_ai_addon/requirements.txt` — production dependencies (aiohttp, croniter)
+- `requirements-test.txt` — test dependencies (includes production deps via `-r`)
 
 ## Running Tests
 

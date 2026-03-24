@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 VENV_PYTHON=".venv/bin/python"
 
 if [ ! -f "$VENV_PYTHON" ]; then
-    echo "Error: Virtual environment not found. Run: python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest pytest-asyncio pytest-docker aiohttp aioresponses"
+    echo "Error: Virtual environment not found. Run: python -m venv .venv && .venv/bin/pip install -r requirements-test.txt"
     exit 1
 fi
 

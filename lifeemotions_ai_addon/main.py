@@ -275,6 +275,13 @@ class CloudApiClient:
                         else:
                             logger.error("API response missing 'last_timestamp' field")
                             return None
+                    elif response.status == 429:
+                        retry_after = int(response.headers.get("Retry-After", RETRY_DELAY_SECONDS))
+                        logger.warning(
+                            f"Rate limited (429) fetching checkpoint, retrying after {retry_after}s (attempt {attempt}/{MAX_RETRIES})"
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
                     elif response.status >= 500:
                         logger.warning(
                             f"Server error {response.status} fetching checkpoint on attempt {attempt}/{MAX_RETRIES}"
@@ -340,6 +347,13 @@ class CloudApiClient:
                     if response.status == 200 or response.status == 201:
                         logger.info(f"Successfully sent {len(records)} records to API")
                         return True
+                    elif response.status == 429:
+                        retry_after = int(response.headers.get("Retry-After", RETRY_DELAY_SECONDS))
+                        logger.warning(
+                            f"Rate limited (429) sending batch, retrying after {retry_after}s (attempt {attempt}/{MAX_RETRIES})"
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
                     elif response.status >= 500:
                         logger.warning(
                             f"Server error {response.status} on attempt {attempt}/{MAX_RETRIES}"
@@ -405,6 +419,13 @@ class CloudApiClient:
                             f"Token verification failed ({response.status}): {error_text}"
                         )
                         return None
+                    elif response.status == 429:
+                        retry_after = int(response.headers.get("Retry-After", RETRY_DELAY_SECONDS))
+                        logger.warning(
+                            f"Rate limited (429) verifying token, retrying after {retry_after}s (attempt {attempt}/{MAX_RETRIES})"
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
                     elif response.status >= 500:
                         logger.warning(
                             f"Server error {response.status} verifying token on attempt {attempt}/{MAX_RETRIES}"
@@ -460,6 +481,13 @@ class CloudApiClient:
                         data = await response.json()
                         logger.info(f"Fetched remote config from API: {list(data.keys())}")
                         return data
+                    elif response.status == 429:
+                        retry_after = int(response.headers.get("Retry-After", RETRY_DELAY_SECONDS))
+                        logger.warning(
+                            f"Rate limited (429) fetching config, retrying after {retry_after}s (attempt {attempt}/{MAX_RETRIES})"
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
                     elif response.status >= 500:
                         logger.warning(
                             f"Server error {response.status} fetching config on attempt {attempt}/{MAX_RETRIES}"

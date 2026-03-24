@@ -78,6 +78,7 @@ def _make_mock_response(resp):
     """Create a single mock response context manager from a response dict."""
     mock_resp = MagicMock()
     mock_resp.status = resp["status"]
+    mock_resp.headers = resp.get("headers", {})
     if "text" in resp:
         mock_resp.text = AsyncMock(return_value=resp["text"])
     if "json" in resp:
@@ -819,3 +820,119 @@ class TestFetchConfig:
 
         assert result == config_data
         assert mock_session.get.call_count == 2
+
+
+class TestRateLimitHandling:
+    """Tests for 429 (Rate Limited) handling across all CloudApiClient methods."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_checkpoint_retries_on_429(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+        mock_session = _make_mock_session(
+            [
+                {"status": 429, "headers": {"Retry-After": "5"}},
+                {"status": 200, "json": {"last_timestamp": 1234.5}},
+            ],
+            method="get",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        with patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await client.fetch_checkpoint()
+
+        assert result == 1234.5
+        assert mock_session.get.call_count == 2
+        mock_sleep.assert_any_call(5)
+
+    @pytest.mark.asyncio
+    async def test_send_batch_retries_on_429(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+        mock_session = _make_mock_session(
+            [
+                {"status": 429, "headers": {"Retry-After": "10"}},
+                {"status": 201},
+            ],
+            method="post",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        with patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await client.send_batch([{"id": 1, "type": "event"}])
+
+        assert result is True
+        assert mock_session.post.call_count == 2
+        mock_sleep.assert_any_call(10)
+
+    @pytest.mark.asyncio
+    async def test_verify_token_retries_on_429(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+        mock_session = _make_mock_session(
+            [
+                {"status": 429, "headers": {"Retry-After": "3"}},
+                {"status": 200, "json": {"sync_interval_minutes": 5, "batch_size": 100}},
+            ],
+            method="post",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        with patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await client.verify_token()
+
+        assert result == {"sync_interval_minutes": 5, "batch_size": 100}
+        assert mock_session.post.call_count == 2
+        mock_sleep.assert_any_call(3)
+
+    @pytest.mark.asyncio
+    async def test_fetch_config_retries_on_429(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+        config_data = {"feature_flags": {"sync_states": True}}
+        mock_session = _make_mock_session(
+            [
+                {"status": 429, "headers": {"Retry-After": "7"}},
+                {"status": 200, "json": config_data},
+            ],
+            method="get",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        with patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await client.fetch_config()
+
+        assert result == config_data
+        assert mock_session.get.call_count == 2
+        mock_sleep.assert_any_call(7)
+
+    @pytest.mark.asyncio
+    async def test_429_uses_default_retry_when_no_header(self):
+        """When Retry-After header is missing, fall back to RETRY_DELAY_SECONDS."""
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ha",
+            auth_token="test-token",
+        )
+        mock_session = _make_mock_session(
+            [
+                {"status": 429, "headers": {}},
+                {"status": 200, "json": {"last_timestamp": 99.0}},
+            ],
+            method="get",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        with patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await client.fetch_checkpoint()
+
+        assert result == 99.0
+        # Should use RETRY_DELAY_SECONDS (5) as default
+        mock_sleep.assert_any_call(5)
