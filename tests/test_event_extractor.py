@@ -40,11 +40,13 @@ class TestSyncCycle:
     """Tests for EventExtractor.sync_cycle()."""
 
     @pytest.mark.asyncio
-    async def test_sync_cycle_processes_events_and_states(self):
+    async def test_sync_cycle_uses_separate_cursors(self):
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
-        extractor.api_client.fetch_checkpoint = AsyncMock(return_value=1705320000.0)
+        extractor.api_client.fetch_checkpoint = AsyncMock(
+            return_value={"event": 1705320000.0, "state": 1705319000.0}
+        )
         extractor.running = True
 
         extractor._process_events = AsyncMock(return_value=1705320060.0)
@@ -54,14 +56,16 @@ class TestSyncCycle:
 
         extractor.api_client.fetch_checkpoint.assert_called_once()
         extractor._process_events.assert_called_once_with(1705320000.0)
-        extractor._process_states.assert_called_once_with(1705320000.0)
+        extractor._process_states.assert_called_once_with(1705319000.0)
 
     @pytest.mark.asyncio
-    async def test_sync_cycle_uses_checkpoint_timestamp(self):
+    async def test_sync_cycle_same_cursors(self):
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
-        extractor.api_client.fetch_checkpoint = AsyncMock(return_value=1705320060.0)
+        extractor.api_client.fetch_checkpoint = AsyncMock(
+            return_value={"event": 1705320060.0, "state": 1705320060.0}
+        )
         extractor.running = True
 
         extractor._process_events = AsyncMock(return_value=1705320120.0)
@@ -89,11 +93,13 @@ class TestSyncCycle:
         extractor._process_states.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_sync_cycle_with_zero_timestamp(self):
+    async def test_sync_cycle_with_zero_timestamps(self):
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
-        extractor.api_client.fetch_checkpoint = AsyncMock(return_value=0.0)
+        extractor.api_client.fetch_checkpoint = AsyncMock(
+            return_value={"event": 0.0, "state": 0.0}
+        )
         extractor.running = True
 
         extractor._process_events = AsyncMock(return_value=1705320000.0)
