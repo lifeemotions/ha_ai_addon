@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 import pytest
 
+from const import CONFIG_REFRESH_INTERVAL_MINUTES
 from main import EventExtractor
 
 
@@ -391,7 +392,7 @@ class TestSyncLoop:
         extractor.sync_interval_minutes = 5
         extractor.batch_size = 100
         extractor.config = None
-        extractor._last_config_refresh = 0.0
+        extractor._last_config_refresh = -CONFIG_REFRESH_INTERVAL_MINUTES * 60
 
         async def fake_sync():
             extractor.running = False
