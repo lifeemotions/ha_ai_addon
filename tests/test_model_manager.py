@@ -100,7 +100,7 @@ class TestModelManagerInit:
         model_dir = tmp_path / "model"
         model_dir.mkdir()
         version_file = model_dir / "version.json"
-        version_file.write_text(json.dumps({"installed_model_version": "1.0.0"}))
+        version_file.write_text(json.dumps({"installed_model_id": "1.0.0"}))
 
         api_client = AsyncMock()
         with patch("main.MODEL_DIR", str(model_dir)), \
@@ -137,7 +137,7 @@ class TestLoadSaveVersion:
     def test_load_valid_version(self, tmp_path):
         mm = ModelManager.__new__(ModelManager)
         version_file = tmp_path / "version.json"
-        version_file.write_text(json.dumps({"installed_model_version": "2.0.0"}))
+        version_file.write_text(json.dumps({"installed_model_id": "2.0.0"}))
         mm.version_file = version_file
 
         result = mm._load_installed_version()
@@ -178,7 +178,7 @@ class TestLoadSaveVersion:
 
         assert mm.version_file.exists()
         data = json.loads(mm.version_file.read_text())
-        assert data["installed_model_version"] == "3.0.0"
+        assert data["installed_model_id"] == "3.0.0"
 
     def test_save_version_creates_directory(self, tmp_path):
         mm = ModelManager.__new__(ModelManager)
@@ -202,7 +202,7 @@ class TestCheckAndUpdate:
     """Tests for ModelManager.check_and_update()."""
 
     @pytest.mark.asyncio
-    async def test_no_model_version_in_config(self, tmp_path):
+    async def test_no_model_id_in_config(self, tmp_path):
         mm = ModelManager.__new__(ModelManager)
         mm.model_dir = tmp_path / "model"
         mm._installed_version = None
@@ -218,7 +218,7 @@ class TestCheckAndUpdate:
         mm._installed_version = "1.0.0"
         mm._download_model = AsyncMock()
 
-        result = await mm.check_and_update({"model_version": "1.0.0"})
+        result = await mm.check_and_update({"model_id": "1.0.0"})
 
         assert result is True
         mm._download_model.assert_not_called()
@@ -236,7 +236,7 @@ class TestCheckAndUpdate:
         mm._install_dependencies = AsyncMock(return_value=True)
         mm._save_installed_version = MagicMock()
 
-        result = await mm.check_and_update({"model_version": "2.0.0"})
+        result = await mm.check_and_update({"model_id": "2.0.0"})
 
         assert result is True
         mm._download_model.assert_called_once_with("2.0.0")
@@ -254,7 +254,7 @@ class TestCheckAndUpdate:
         mm._download_model = AsyncMock(return_value=None)
 
         with patch.object(mm, "has_model", return_value=True):
-            result = await mm.check_and_update({"model_version": "2.0.0"})
+            result = await mm.check_and_update({"model_id": "2.0.0"})
 
         assert result is True  # has_model returns True
 
@@ -269,7 +269,7 @@ class TestCheckAndUpdate:
         mm._extract_archive = MagicMock(return_value=False)
 
         with patch.object(mm, "has_model", return_value=True):
-            result = await mm.check_and_update({"model_version": "2.0.0"})
+            result = await mm.check_and_update({"model_id": "2.0.0"})
 
         assert result is True
 
@@ -284,7 +284,7 @@ class TestCheckAndUpdate:
         mm._extract_archive = MagicMock(return_value=True)
         mm._install_dependencies = AsyncMock(return_value=False)
 
-        result = await mm.check_and_update({"model_version": "2.0.0"})
+        result = await mm.check_and_update({"model_id": "2.0.0"})
 
         assert result is False
 
@@ -301,7 +301,7 @@ class TestCheckAndUpdate:
         mm._install_dependencies = AsyncMock(return_value=True)
         mm._save_installed_version = MagicMock()
 
-        result = await mm.check_and_update({"model_version": "1.0.0"})
+        result = await mm.check_and_update({"model_id": "1.0.0"})
 
         assert result is True
         assert mm._installed_version == "1.0.0"
@@ -329,7 +329,7 @@ class TestDownloadModel:
         assert result is not None
         assert result.exists()
         assert result.read_bytes() == archive_data
-        assert result.name == "model-1.0.0.tar.gz"
+        assert result.name == "model-1.0.0.archive"
 
         # Verify URL
         call_args = mock_session.get.call_args
@@ -576,7 +576,7 @@ class TestExtractArchive:
 
         # Create version.json
         version_file = mm.model_dir / "version.json"
-        version_file.write_text(json.dumps({"installed_model_version": "1.0.0"}))
+        version_file.write_text(json.dumps({"installed_model_id": "1.0.0"}))
 
         archive = make_model_archive({"predict.py": "new code"})
         import shutil
@@ -587,7 +587,7 @@ class TestExtractArchive:
         assert result is True
         assert version_file.exists()
         data = json.loads(version_file.read_text())
-        assert data["installed_model_version"] == "1.0.0"
+        assert data["installed_model_id"] == "1.0.0"
 
     def test_extract_handles_corrupt_archive(self, tmp_path):
         mm = ModelManager.__new__(ModelManager)
@@ -599,6 +599,48 @@ class TestExtractArchive:
 
         result = mm._extract_archive(corrupt)
         assert result is False
+
+    def test_extract_zip_archive(self, tmp_path):
+        import zipfile as zf
+        mm = ModelManager.__new__(ModelManager)
+        mm.model_dir = tmp_path / "model"
+        mm.model_dir.mkdir()
+
+        archive_path = tmp_path / "model.zip"
+        with zf.ZipFile(archive_path, "w") as z:
+            z.writestr("predict.py", "print('hello')")
+            z.writestr("requirements.txt", "xgboost")
+            z.writestr("model.json", '{"tree": []}')
+
+        import shutil
+        dest = mm.model_dir / archive_path.name
+        shutil.copy(str(archive_path), str(dest))
+
+        result = mm._extract_archive(dest)
+        assert result is True
+        assert (mm.model_dir / "predict.py").exists()
+        assert (mm.model_dir / "requirements.txt").exists()
+        assert (mm.model_dir / "model.json").exists()
+
+    def test_extract_zip_filters_path_traversal(self, tmp_path):
+        import zipfile as zf
+        mm = ModelManager.__new__(ModelManager)
+        mm.model_dir = tmp_path / "model"
+        mm.model_dir.mkdir()
+
+        archive_path = tmp_path / "evil.zip"
+        with zf.ZipFile(archive_path, "w") as z:
+            z.writestr("predict.py", "safe")
+            z.writestr("../../../evil.txt", "evil")
+
+        import shutil
+        dest = mm.model_dir / archive_path.name
+        shutil.copy(str(archive_path), str(dest))
+
+        result = mm._extract_archive(dest)
+        assert result is True
+        assert (mm.model_dir / "predict.py").exists()
+        assert not (tmp_path / "evil.txt").exists()
 
 
 class TestInstallDependencies:
