@@ -14,6 +14,7 @@ import signal
 import sqlite3
 import sys
 import tarfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -544,27 +545,28 @@ class ModelManager:
     # --- Version tracking ---
 
     def _load_installed_version(self) -> Optional[str]:
-        """Read installed model version from local version.json."""
+        """Read installed model ID from local version.json."""
         if not self.version_file.exists():
             return None
         try:
             with open(self.version_file) as f:
                 data = json.load(f)
-            version = data.get("installed_model_version")
-            if version:
-                logger.info(f"Loaded installed model version: {version}")
-            return version
+            # Support both new (installed_model_id) and legacy (installed_model_version) keys
+            model_id = data.get("installed_model_id") or data.get("installed_model_version")
+            if model_id:
+                logger.info(f"Loaded installed model ID: {model_id}")
+            return model_id
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"Failed to load model version file: {e}")
             return None
 
     def _save_installed_version(self, version: str) -> None:
-        """Write installed model version to local version.json."""
+        """Write installed model ID to local version.json."""
         try:
             self.model_dir.mkdir(parents=True, exist_ok=True)
             with open(self.version_file, "w") as f:
-                json.dump({"installed_model_version": version}, f, indent=2)
-            logger.info(f"Saved installed model version: {version}")
+                json.dump({"installed_model_id": version}, f, indent=2)
+            logger.info(f"Saved installed model ID: {version}")
         except OSError as e:
             logger.warning(f"Failed to save model version file: {e}")
 
@@ -575,18 +577,19 @@ class ModelManager:
     # --- Download + Install ---
 
     async def check_and_update(self, config: dict[str, Any]) -> bool:
-        """Compare config model_version to installed. Download if different.
+        """Compare config model_id to installed. Download if different.
 
         Returns True if model is ready (either already current or newly installed).
         Returns False if no model is available.
         """
-        remote_version = config.get("model_version")
+        # Support both new (model_id) and legacy (model_version) config keys
+        remote_version = config.get("model_id") or config.get("model_version")
         if not remote_version:
-            logger.info("No model_version in config, skipping model update")
+            logger.info("No model_id in config, skipping model update")
             return self.has_model()
 
         if remote_version == self._installed_version:
-            logger.debug(f"Model already at version {remote_version}")
+            logger.debug(f"Model already at {remote_version}")
             return True
 
         logger.info(f"Model update available: {self._installed_version} -> {remote_version}")
@@ -604,21 +607,21 @@ class ModelManager:
 
         self._installed_version = remote_version
         self._save_installed_version(remote_version)
-        logger.info(f"Model updated to version {remote_version}")
+        logger.info(f"Model updated to {remote_version}")
         return True
 
-    async def _download_model(self, version: str) -> Optional[Path]:
-        """Download model archive from API. Returns path to .tar.gz file or None."""
+    async def _download_model(self, model_id: str) -> Optional[Path]:
+        """Download model archive from API. Returns path to archive file or None."""
         if not self.api_client.auth_token:
             logger.error("No auth token, cannot download model")
             return None
 
         headers = {"Authorization": f"Bearer {self.api_client.auth_token}"}
-        url = f"{self.api_client.api_endpoint}/model/{version}"
+        url = f"{self.api_client.api_endpoint}/model/{model_id}"
         timeout = aiohttp.ClientTimeout(total=MODEL_DOWNLOAD_TIMEOUT_SECONDS)
 
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = self.model_dir / f"model-{version}.tar.gz"
+        archive_path = self.model_dir / f"model-{model_id}.archive"
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -628,10 +631,10 @@ class ModelManager:
                         with open(archive_path, "wb") as f:
                             async for chunk in response.content.iter_chunked(8192):
                                 f.write(chunk)
-                        logger.info(f"Downloaded model v{version} ({archive_path.stat().st_size} bytes)")
+                        logger.info(f"Downloaded model {model_id} ({archive_path.stat().st_size} bytes)")
                         return archive_path
                     elif response.status == 404:
-                        logger.error(f"Model version {version} not found on server (404)")
+                        logger.error(f"Model {model_id} not found on server (404)")
                         return None
                     elif response.status >= 500:
                         logger.warning(
@@ -659,22 +662,17 @@ class ModelManager:
         return None
 
     def _extract_archive(self, archive_path: Path) -> bool:
-        """Extract tar.gz archive to model directory."""
+        """Extract tar.gz or zip archive to model directory."""
         try:
             temp_extract_dir = self.model_dir / "_extract_tmp"
             if temp_extract_dir.exists():
                 shutil.rmtree(temp_extract_dir)
             temp_extract_dir.mkdir()
 
-            with tarfile.open(archive_path, "r:gz") as tar:
-                # Security: filter out absolute paths and path traversal
-                safe_members = []
-                for member in tar.getmembers():
-                    if member.name.startswith("/") or ".." in member.name:
-                        logger.warning(f"Skipping unsafe tar member: {member.name}")
-                        continue
-                    safe_members.append(member)
-                tar.extractall(path=temp_extract_dir, members=safe_members)
+            if self._is_zip_archive(archive_path):
+                self._extract_zip(archive_path, temp_extract_dir)
+            else:
+                self._extract_tarball(archive_path, temp_extract_dir)
 
             # Remove old model files (except version.json and the archive itself)
             for item in self.model_dir.iterdir():
@@ -702,9 +700,40 @@ class ModelManager:
             logger.info("Model archive extracted successfully")
             return True
 
-        except (tarfile.TarError, OSError) as e:
+        except (tarfile.TarError, zipfile.BadZipFile, OSError) as e:
             logger.error(f"Failed to extract model archive: {e}")
             return False
+
+    @staticmethod
+    def _is_zip_archive(path: Path) -> bool:
+        """Check if file is a zip archive by reading its magic bytes."""
+        try:
+            with open(path, "rb") as f:
+                return f.read(4) == b"PK\x03\x04"
+        except OSError:
+            return False
+
+    @staticmethod
+    def _extract_tarball(archive_path: Path, dest: Path) -> None:
+        """Extract a tar.gz archive with security filtering."""
+        with tarfile.open(archive_path, "r:gz") as tar:
+            safe_members = []
+            for member in tar.getmembers():
+                if member.name.startswith("/") or ".." in member.name:
+                    logger.warning(f"Skipping unsafe tar member: {member.name}")
+                    continue
+                safe_members.append(member)
+            tar.extractall(path=dest, members=safe_members)
+
+    @staticmethod
+    def _extract_zip(archive_path: Path, dest: Path) -> None:
+        """Extract a zip archive with security filtering."""
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            for info in zf.infolist():
+                if info.filename.startswith("/") or ".." in info.filename:
+                    logger.warning(f"Skipping unsafe zip member: {info.filename}")
+                    continue
+                zf.extract(info, dest)
 
     async def _install_dependencies(self) -> bool:
         """Run pip install from model's requirements.txt if it exists."""
