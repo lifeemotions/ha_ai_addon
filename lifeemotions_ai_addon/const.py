@@ -5,15 +5,18 @@ import os
 
 logger = logging.getLogger("lifeemotions_ai_addon")
 
+# Base path for Home Assistant config directory (mapped via config.yaml homeassistant_config:rw)
+HA_CONFIG_DIR = "/homeassistant"
+
 # Database configuration
-DATABASE_PATH = "/homeassistant/home-assistant_v2.db"
+DATABASE_PATH = f"{HA_CONFIG_DIR}/home-assistant_v2.db"
 
 # API configuration
 API_ENDPOINT = os.environ.get("API_ENDPOINT", "https://api.life-emotions.com/ha")
 CLOUD_AUTH_TOKEN = os.environ.get("CLOUD_AUTH_TOKEN", "")
 
 # Remote config
-CONFIG_FILE_PATH = "/config/lifeemotions_config.json"
+CONFIG_FILE_PATH = f"{HA_CONFIG_DIR}/lifeemotions_config.json"
 CONFIG_REFRESH_INTERVAL_MINUTES = 60
 
 
@@ -29,8 +32,8 @@ RETRY_DELAY_SECONDS = 5
 ORIGIN = "local"
 
 # Model management
-MODEL_DIR = "/config/lifeemotions_model"
-MODEL_VERSION_FILE = "/config/lifeemotions_model/version.json"
+MODEL_DIR = f"{HA_CONFIG_DIR}/lifeemotions_model"
+MODEL_VERSION_FILE = f"{MODEL_DIR}/version.json"
 MODEL_ENTRY_POINT = "predict.py"
 MODEL_REQUIREMENTS_FILE = "requirements.txt"
 MODEL_DOWNLOAD_TIMEOUT_SECONDS = 300
