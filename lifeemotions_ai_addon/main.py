@@ -7,6 +7,7 @@ and streams them to a remote Cloud API.
 """
 
 import asyncio
+import fnmatch
 import json
 import logging
 import shutil
@@ -23,11 +24,13 @@ import aiohttp
 
 from ha_api import check_recorder_dialect
 from const import (
+    AGGREGATION_BUCKET_SECONDS,
     API_ENDPOINT,
     CLOUD_AUTH_TOKEN,
     CONFIG_FILE_PATH,
     CONFIG_REFRESH_INTERVAL_MINUTES,
     DATABASE_PATH,
+    DEFAULT_EXCLUDE_ENTITY_PREFIXES,
     HEARTBEAT_INTERVAL_SECONDS,
     MAX_RETRIES,
     MODEL_DIR,
@@ -217,6 +220,119 @@ class DatabaseReader:
         except (KeyError, TypeError, ValueError) as e:
             logger.warning(f"Failed to parse state row: {e}")
             return None
+
+
+class DataProcessor:
+    """Filters and aggregates records before sending to the Cloud API.
+
+    Tier 1 — Entity filtering: hardcoded prefix exclusions + server-side config.
+    Tier 2 — Numeric aggregation: 5-minute buckets, average value.
+    """
+
+    def __init__(self):
+        self._include_domains: set[str] = set()
+        self._exclude_entities: list[str] = []
+
+    def update_filters(self, config: dict[str, Any]) -> None:
+        """Update entity filters from remote config."""
+        filters = config.get("entity_filters", {})
+        self._include_domains = set(filters.get("include_domains", []))
+        self._exclude_entities = filters.get("exclude_entities", [])
+
+    def _is_entity_allowed(self, entity_id: str) -> bool:
+        """Check if an entity passes filtering rules."""
+        if not entity_id:
+            return True
+
+        # Hardcoded prefix exclusions (always applied)
+        for prefix in DEFAULT_EXCLUDE_ENTITY_PREFIXES:
+            if entity_id.startswith(prefix):
+                return False
+
+        # Server-side include_domains filter
+        if self._include_domains:
+            domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+            if domain not in self._include_domains:
+                return False
+
+        # Server-side exclude_entities filter (glob patterns)
+        for pattern in self._exclude_entities:
+            if fnmatch.fnmatch(entity_id, pattern):
+                return False
+
+        return True
+
+    def _aggregate_numeric_states(self, states: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Aggregate numeric states into 5-minute buckets (avg value).
+
+        Non-numeric states pass through unchanged.
+        """
+        numeric_buckets: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        non_numeric: list[dict[str, Any]] = []
+
+        for record in states:
+            state_val = record.get("state")
+            try:
+                float(state_val)
+                is_numeric = True
+            except (ValueError, TypeError):
+                is_numeric = False
+
+            if is_numeric:
+                entity_id = record["entity_id"]
+                bucket = int(record["raw_timestamp"] // AGGREGATION_BUCKET_SECONDS)
+                key = (entity_id, bucket)
+                numeric_buckets.setdefault(key, []).append(record)
+            else:
+                non_numeric.append(record)
+
+        aggregated: list[dict[str, Any]] = []
+        for (_entity_id, _bucket), records in numeric_buckets.items():
+            values = [float(r["state"]) for r in records]
+            avg_val = sum(values) / len(values)
+            template = records[-1]  # use last record as template
+            max_ts = max(r["raw_timestamp"] for r in records)
+
+            aggregated.append({
+                "type": "state",
+                "timestamp": datetime.fromtimestamp(max_ts, tz=timezone.utc).isoformat(),
+                "raw_timestamp": max_ts,
+                "entity_id": template["entity_id"],
+                "event_type": "state_changed",
+                "state": str(round(avg_val, 4)),
+                "attributes": template.get("attributes") or {},
+                "origin": template.get("origin", ORIGIN),
+            })
+
+        result = non_numeric + aggregated
+        result.sort(key=lambda r: r["raw_timestamp"])
+        return result
+
+    def process_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Apply entity filtering to events."""
+        filtered = [e for e in events if self._is_entity_allowed(e.get("entity_id", ""))]
+        dropped = len(events) - len(filtered)
+        if dropped:
+            logger.info(f"Entity filter: events {len(events)} -> {len(filtered)} ({dropped} excluded)")
+        return filtered
+
+    def process_states(self, states: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Apply entity filtering + numeric aggregation to states."""
+        # Tier 1: filter
+        filtered = [s for s in states if self._is_entity_allowed(s.get("entity_id", ""))]
+        filter_dropped = len(states) - len(filtered)
+
+        # Tier 2: aggregate numeric
+        result = self._aggregate_numeric_states(filtered)
+        agg_reduced = len(filtered) - len(result)
+
+        if filter_dropped or agg_reduced:
+            logger.info(
+                f"States processed: {len(states)} raw, "
+                f"{filter_dropped} filtered, {agg_reduced} aggregated, "
+                f"{len(result)} to send"
+            )
+        return result
 
 
 class CloudApiClient:
@@ -850,6 +966,7 @@ class EventExtractor:
         self.db_reader = db_reader or DatabaseReader()
         self.api_client = api_client or CloudApiClient()
         self.model_manager = model_manager or ModelManager(self.api_client)
+        self.data_processor = DataProcessor()
         self.running = True
         self.config: Optional[dict[str, Any]] = None
         self._last_config_refresh: float = 0.0
@@ -1001,6 +1118,10 @@ class EventExtractor:
                 logger.warning("No local config available")
         self._last_config_refresh = asyncio.get_event_loop().time()
 
+        # Update data processor filters from config
+        if self.config:
+            self.data_processor.update_filters(self.config)
+
         # Check for model updates when config is available
         if self.config:
             await self.model_manager.check_and_update(self.config)
@@ -1026,23 +1147,31 @@ class EventExtractor:
         batch_size = self.batch_size
 
         while True:
-            events = self.db_reader.fetch_events(current_timestamp, batch_size)
+            raw_events = self.db_reader.fetch_events(current_timestamp, batch_size)
 
-            if not events:
+            if not raw_events:
                 logger.info("No new events to process")
                 break
+
+            batch_max_ts = max(e["raw_timestamp"] for e in raw_events)
+            events = self.data_processor.process_events(raw_events)
+
+            if not events:
+                current_timestamp = batch_max_ts
+                if len(raw_events) < batch_size:
+                    break
+                continue
 
             success = await self.api_client.send_batch(events)
 
             if success:
-                current_timestamp = max(e["raw_timestamp"] for e in events)
+                current_timestamp = batch_max_ts
                 logger.info(f"Processed events up to timestamp={current_timestamp}")
             else:
                 logger.warning("Failed to send events batch, will retry next cycle")
                 break
 
-            # If we got fewer than batch_size, we've reached the end
-            if len(events) < batch_size:
+            if len(raw_events) < batch_size:
                 break
 
         return current_timestamp
@@ -1053,23 +1182,31 @@ class EventExtractor:
         batch_size = self.batch_size
 
         while True:
-            states = self.db_reader.fetch_states(current_timestamp, batch_size)
+            raw_states = self.db_reader.fetch_states(current_timestamp, batch_size)
 
-            if not states:
+            if not raw_states:
                 logger.info("No new states to process")
                 break
+
+            batch_max_ts = max(s["raw_timestamp"] for s in raw_states)
+            states = self.data_processor.process_states(raw_states)
+
+            if not states:
+                current_timestamp = batch_max_ts
+                if len(raw_states) < batch_size:
+                    break
+                continue
 
             success = await self.api_client.send_batch(states)
 
             if success:
-                current_timestamp = max(s["raw_timestamp"] for s in states)
+                current_timestamp = batch_max_ts
                 logger.info(f"Processed states up to timestamp={current_timestamp}")
             else:
                 logger.warning("Failed to send states batch, will retry next cycle")
                 break
 
-            # If we got fewer than batch_size, we've reached the end
-            if len(states) < batch_size:
+            if len(raw_states) < batch_size:
                 break
 
         return current_timestamp

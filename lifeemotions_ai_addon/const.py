@@ -39,6 +39,13 @@ MODEL_REQUIREMENTS_FILE = "requirements.txt"
 MODEL_DOWNLOAD_TIMEOUT_SECONDS = 300
 PREDICTION_TIMEOUT_SECONDS = 600
 
+# Data processing
+AGGREGATION_BUCKET_SECONDS = 300  # 5-minute buckets for numeric state aggregation
+DEFAULT_EXCLUDE_ENTITY_PREFIXES = [
+    "sensor.system_monitor_",
+    "sensor.knx_interface_",
+]
+
 # Table names
 EVENTS_TABLE = "events"
 STATES_TABLE = "states"

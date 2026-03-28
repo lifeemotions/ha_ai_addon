@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 import pytest
 
 from const import CONFIG_REFRESH_INTERVAL_MINUTES
-from main import EventExtractor
+from main import DataProcessor, EventExtractor
 
 
 class TestEventExtractorInit:
@@ -121,6 +121,7 @@ class TestProcessEvents:
         extractor.db_reader = MagicMock()
         extractor.db_reader.fetch_events.return_value = []
         extractor.api_client = AsyncMock()
+        extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
 
         result = await extractor._process_events(1705320000.0)
@@ -133,6 +134,7 @@ class TestProcessEvents:
         extractor.db_reader.fetch_events.side_effect = [sample_event_records, []]
         extractor.api_client = AsyncMock()
         extractor.api_client.send_batch = AsyncMock(return_value=True)
+        extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
 
         result = await extractor._process_events(0.0)
@@ -145,6 +147,7 @@ class TestProcessEvents:
         extractor.db_reader.fetch_events.return_value = sample_event_records
         extractor.api_client = AsyncMock()
         extractor.api_client.send_batch = AsyncMock(return_value=False)
+        extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
 
         result = await extractor._process_events(0.0)
@@ -155,16 +158,17 @@ class TestProcessEvents:
         """When batch_size events are returned, should fetch another batch."""
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
+        extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
 
         # First batch: exactly batch_size records with raw_timestamps
         batch1 = [
-            {"id": i, "type": "event", "raw_timestamp": 1705320000.0 + i}
+            {"id": i, "type": "event", "raw_timestamp": 1705320000.0 + i, "entity_id": "automation.test"}
             for i in range(1, extractor.batch_size + 1)
         ]
         # Second batch: fewer than batch_size (end of data)
         batch2 = [
-            {"id": extractor.batch_size + 1, "type": "event", "raw_timestamp": 1705320000.0 + extractor.batch_size + 1}
+            {"id": extractor.batch_size + 1, "type": "event", "raw_timestamp": 1705320000.0 + extractor.batch_size + 1, "entity_id": "automation.test"}
         ]
 
         extractor.db_reader.fetch_events.side_effect = [batch1, batch2]
@@ -185,6 +189,7 @@ class TestProcessStates:
         extractor.db_reader = MagicMock()
         extractor.db_reader.fetch_states.return_value = []
         extractor.api_client = AsyncMock()
+        extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
 
         result = await extractor._process_states(1705320000.0)
@@ -197,6 +202,7 @@ class TestProcessStates:
         extractor.db_reader.fetch_states.side_effect = [sample_state_records, []]
         extractor.api_client = AsyncMock()
         extractor.api_client.send_batch = AsyncMock(return_value=True)
+        extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
 
         result = await extractor._process_states(0.0)
@@ -209,6 +215,7 @@ class TestProcessStates:
         extractor.db_reader.fetch_states.return_value = sample_state_records
         extractor.api_client = AsyncMock()
         extractor.api_client.send_batch = AsyncMock(return_value=False)
+        extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
 
         result = await extractor._process_states(0.0)
@@ -532,6 +539,7 @@ class TestRefreshConfig:
         extractor.api_client = AsyncMock()
         extractor.model_manager = AsyncMock()
         extractor.model_manager.check_and_update = AsyncMock(return_value=True)
+        extractor.data_processor = DataProcessor()
         extractor.config = None
         extractor._last_config_refresh = 0.0
 
@@ -553,6 +561,7 @@ class TestRefreshConfig:
         extractor.api_client = AsyncMock()
         extractor.model_manager = AsyncMock()
         extractor.model_manager.check_and_update = AsyncMock(return_value=True)
+        extractor.data_processor = DataProcessor()
         extractor.config = None
         extractor._last_config_refresh = 0.0
 
