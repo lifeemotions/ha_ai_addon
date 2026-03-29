@@ -41,9 +41,19 @@ PREDICTION_TIMEOUT_SECONDS = 600
 
 # Data processing
 AGGREGATION_BUCKET_SECONDS = 300  # 5-minute buckets for numeric state aggregation
+DEFAULT_EXCLUDE_DOMAINS = [
+    "device_tracker",
+    "update",
+]
 DEFAULT_EXCLUDE_ENTITY_PREFIXES = [
     "sensor.system_monitor_",
     "sensor.knx_interface_",
+    "sensor.disk_free",
+    "sensor.disk_use",
+    "sensor.logger",
+    "sensor.memory_free",
+    "sensor.memory_use",
+    "sensor.time",
 ]
 
 # Table names

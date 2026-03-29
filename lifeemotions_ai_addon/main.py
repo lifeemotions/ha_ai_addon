@@ -30,6 +30,7 @@ from const import (
     CONFIG_FILE_PATH,
     CONFIG_REFRESH_INTERVAL_MINUTES,
     DATABASE_PATH,
+    DEFAULT_EXCLUDE_DOMAINS,
     DEFAULT_EXCLUDE_ENTITY_PREFIXES,
     HEARTBEAT_INTERVAL_SECONDS,
     MAX_RETRIES,
@@ -244,6 +245,11 @@ class DataProcessor:
         if not entity_id:
             return True
 
+        # Hardcoded domain exclusions (always applied)
+        domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+        if domain in DEFAULT_EXCLUDE_DOMAINS:
+            return False
+
         # Hardcoded prefix exclusions (always applied)
         for prefix in DEFAULT_EXCLUDE_ENTITY_PREFIXES:
             if entity_id.startswith(prefix):
@@ -251,7 +257,6 @@ class DataProcessor:
 
         # Server-side include_domains filter
         if self._include_domains:
-            domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
             if domain not in self._include_domains:
                 return False
 
