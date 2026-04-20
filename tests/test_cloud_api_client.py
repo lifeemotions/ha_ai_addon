@@ -114,6 +114,73 @@ def _make_mock_session(responses, method="post"):
     return mock_session
 
 
+class TestSendManifest:
+    """Tests for CloudApiClient.send_manifest()."""
+
+    @pytest.mark.asyncio
+    async def test_empty_entities_returns_true_no_request(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com",
+            auth_token="token",
+        )
+        client._get_session = AsyncMock()
+        result = await client.send_manifest([])
+        assert result is True
+        client._get_session.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_auth_token_returns_false(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com",
+            auth_token="",
+        )
+        entities = [{"entity_id": "sensor.temp", "labels": []}]
+        result = await client.send_manifest(entities)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_successful_manifest_200(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ingest",
+            auth_token="test-token",
+        )
+        server_response = {
+            "entities": [
+                {"entity_ref": "uuid-1", "entity_id": "sensor.temp", "sync_enabled": True, "labels": ["living_room"]},
+                {"entity_ref": "uuid-2", "entity_id": "sensor.humidity", "sync_enabled": False, "labels": []},
+            ]
+        }
+        mock_session = _make_mock_session({"status": 200, "json": server_response})
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        entities = [
+            {"entity_id": "sensor.temp", "friendly_name": "Temp", "domain": "sensor", "labels": ["living_room"]},
+            {"entity_id": "sensor.humidity", "friendly_name": "Humidity", "domain": "sensor", "labels": []},
+        ]
+        result = await client.send_manifest(entities)
+        assert result is True
+
+        call_args = mock_session.post.call_args
+        assert call_args[0][0] == "https://api.test.com/ingest/v2/entities/manifest"
+        assert call_args[1]["json"] == {"entities": entities}
+        assert call_args[1]["headers"]["Authorization"] == "Bearer test-token"
+
+    @pytest.mark.asyncio
+    async def test_manifest_4xx_fails_fast(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com",
+            auth_token="token",
+        )
+        mock_session = _make_mock_session({"status": 400, "text": "bad request"})
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        entities = [{"entity_id": "sensor.x", "labels": []}]
+        result = await client.send_manifest(entities)
+        assert result is False
+        # Only one attempt on 4xx
+        assert mock_session.post.call_count == 1
+
+
 class TestSendBatch:
     """Tests for CloudApiClient.send_batch()."""
 
@@ -151,7 +218,7 @@ class TestSendBatch:
 
         # Verify correct URL, headers and payload structure
         call_args = mock_session.post.call_args
-        assert call_args[0][0] == "https://api.test.com/ingest/data"
+        assert call_args[0][0] == "https://api.test.com/ingest/v2/data"
         assert call_args[1]["headers"]["Authorization"] == "Bearer test-token-1234"
         assert call_args[1]["headers"]["Content-Type"] == "application/json"
         payload = call_args[1]["json"]

@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.3.0] - 2026-04-20
+
+### Added
+- Entity manifest sync. Once per config-refresh cycle the addon reads the HA
+  entity registry (via WebSocket) and POSTs the entity list — with labels — to
+  the cloud. The cloud uses this to drive its opt-in sync model: labeled
+  entities auto-enable; unlabeled entities stay disabled until the user
+  toggles them in the console UI.
+
+### Changed
+- Data sync now targets the v2 API (`POST /ha/v2/data`). The server drops
+  records for disabled entities, so only sync-enabled entities land in the
+  time-series store.
+- 5-minute bucketing now applies to **all** state types. Previously only
+  numeric states were aggregated (avg/bucket) and non-numeric states passed
+  through unchanged. Now non-numeric states (on/off, text, `unavailable`,
+  `unknown`) are collapsed to the last value in each 5-min bucket. This
+  matches the cloud-side safety net that drops records arriving <5 min after
+  the last record for the same entity.
+
+### Requires
+- Cloud API with the v2 endpoints deployed (console PR #111+).
+
 ## [1.0.0] - 2026-02-26
 
 ### Added

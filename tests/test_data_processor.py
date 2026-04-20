@@ -144,12 +144,27 @@ class TestNumericAggregation:
         assert result[0]["state"] == "22.0"  # avg of 20, 22, 24
         assert result[0]["raw_timestamp"] == 250.0  # max
 
-    def test_non_numeric_passes_through(self):
+    def test_non_numeric_same_bucket_keeps_last(self):
+        """Non-numeric states are bucketed (last-value wins) — same 5-min window collapses to one."""
         dp = DataProcessor()
         states = [
             {"entity_id": "light.kitchen", "raw_timestamp": 100.0, "state": "on",
              "event_type": "state_changed", "attributes": {}, "origin": "local"},
             {"entity_id": "light.kitchen", "raw_timestamp": 200.0, "state": "off",
+             "event_type": "state_changed", "attributes": {}, "origin": "local"},
+        ]
+        result = dp.process_states(states)
+        assert len(result) == 1
+        assert result[0]["state"] == "off"  # last in bucket
+        assert result[0]["raw_timestamp"] == 200.0
+
+    def test_non_numeric_different_buckets_both_kept(self):
+        """Non-numeric states in different 5-min buckets are each kept."""
+        dp = DataProcessor()
+        states = [
+            {"entity_id": "light.kitchen", "raw_timestamp": 100.0, "state": "on",
+             "event_type": "state_changed", "attributes": {}, "origin": "local"},
+            {"entity_id": "light.kitchen", "raw_timestamp": 400.0, "state": "off",
              "event_type": "state_changed", "attributes": {}, "origin": "local"},
         ]
         result = dp.process_states(states)
@@ -244,7 +259,8 @@ class TestNumericAggregation:
         timestamps = [r["raw_timestamp"] for r in result]
         assert timestamps == sorted(timestamps)
 
-    def test_unavailable_unknown_not_aggregated(self):
+    def test_unavailable_unknown_bucketed_last_wins(self):
+        """Non-numeric states in the same bucket collapse to the last; numeric in same bucket is its own aggregate."""
         dp = DataProcessor()
         states = [
             {"entity_id": "sensor.temp", "raw_timestamp": 100.0, "state": "unavailable",
@@ -255,10 +271,14 @@ class TestNumericAggregation:
              "event_type": "state_changed", "attributes": {}, "origin": "local"},
         ]
         result = dp.process_states(states)
-        assert len(result) == 3  # 2 non-numeric pass through + 1 numeric
-        assert result[0]["state"] == "unavailable"
-        assert result[1]["state"] == "unknown"
-        assert result[2]["state"] == "22.5"
+        # unavailable@100 and unknown@200 collapse to unknown@200 (last in non-numeric bucket).
+        # 22.5@250 is its own numeric aggregate (avg of a single reading).
+        assert len(result) == 2
+        states_by_ts = sorted(result, key=lambda r: r["raw_timestamp"])
+        assert states_by_ts[0]["state"] == "unknown"
+        assert states_by_ts[0]["raw_timestamp"] == 200.0
+        assert states_by_ts[1]["state"] == "22.5"
+        assert states_by_ts[1]["raw_timestamp"] == 250.0
 
     def test_single_numeric_reading_still_aggregated(self):
         dp = DataProcessor()
