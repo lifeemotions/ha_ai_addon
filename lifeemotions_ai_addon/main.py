@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 import aiohttp
 
-from ha_api import check_recorder_dialect
+from ha_api import check_recorder_dialect, fetch_entity_registry
 from const import (
     AGGREGATION_BUCKET_SECONDS,
     API_ENDPOINT,
@@ -267,13 +267,18 @@ class DataProcessor:
 
         return True
 
-    def _aggregate_numeric_states(self, states: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Aggregate numeric states into 5-minute buckets (avg value).
+    def _aggregate_states(self, states: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Aggregate state records into 5-minute buckets per entity.
 
-        Non-numeric states pass through unchanged.
+        - Numeric states: bucket average (one record per entity per 5-min window).
+        - Non-numeric states (on/off, text, unavailable, unknown):
+          last-value in bucket (one record per entity per 5-min window).
+
+        Both paths collapse <5-min cadence to 5-min cadence, matching the
+        console-side safety net that drops records closer than 5 min apart.
         """
         numeric_buckets: dict[tuple[str, int], list[dict[str, Any]]] = {}
-        non_numeric: list[dict[str, Any]] = []
+        non_numeric_buckets: dict[tuple[str, int], dict[str, Any]] = {}
 
         for record in states:
             state_val = record.get("state")
@@ -283,19 +288,24 @@ class DataProcessor:
             except (ValueError, TypeError):
                 is_numeric = False
 
+            entity_id = record["entity_id"]
+            bucket = int(record["raw_timestamp"] // AGGREGATION_BUCKET_SECONDS)
+            key = (entity_id, bucket)
+
             if is_numeric:
-                entity_id = record["entity_id"]
-                bucket = int(record["raw_timestamp"] // AGGREGATION_BUCKET_SECONDS)
-                key = (entity_id, bucket)
                 numeric_buckets.setdefault(key, []).append(record)
             else:
-                non_numeric.append(record)
+                # Keep the record with the latest timestamp in this bucket.
+                existing = non_numeric_buckets.get(key)
+                if existing is None or record["raw_timestamp"] > existing["raw_timestamp"]:
+                    non_numeric_buckets[key] = record
 
         aggregated: list[dict[str, Any]] = []
-        for (_entity_id, _bucket), records in numeric_buckets.items():
+
+        for records in numeric_buckets.values():
             values = [float(r["state"]) for r in records]
             avg_val = sum(values) / len(values)
-            template = records[-1]  # use last record as template
+            template = records[-1]
             max_ts = max(r["raw_timestamp"] for r in records)
 
             aggregated.append({
@@ -309,9 +319,18 @@ class DataProcessor:
                 "origin": template.get("origin", ORIGIN),
             })
 
-        result = non_numeric + aggregated
-        result.sort(key=lambda r: r["raw_timestamp"])
-        return result
+        for record in non_numeric_buckets.values():
+            aggregated.append(record)
+
+        aggregated.sort(key=lambda r: r["raw_timestamp"])
+        return aggregated
+
+    # Backwards-compatible alias — tests and older callers reach in via the
+    # legacy name. Delegates to the new symmetric-bucket implementation.
+    def _aggregate_numeric_states(
+        self, states: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return self._aggregate_states(states)
 
     def process_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Apply entity filtering to events."""
@@ -322,13 +341,13 @@ class DataProcessor:
         return filtered
 
     def process_states(self, states: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Apply entity filtering + numeric aggregation to states."""
+        """Apply entity filtering + 5-minute bucketing to all state types."""
         # Tier 1: filter
         filtered = [s for s in states if self._is_entity_allowed(s.get("entity_id", ""))]
         filter_dropped = len(states) - len(filtered)
 
-        # Tier 2: aggregate numeric
-        result = self._aggregate_numeric_states(filtered)
+        # Tier 2: bucket — numeric=avg, non-numeric=last-in-bucket
+        result = self._aggregate_states(filtered)
         agg_reduced = len(filtered) - len(result)
 
         if filter_dropped or agg_reduced:
@@ -448,7 +467,11 @@ class CloudApiClient:
 
     async def send_batch(self, records: list[dict[str, Any]]) -> bool:
         """
-        Send a batch of records to the Cloud API.
+        Send a batch of records to the Cloud API via v2.
+
+        Posts to POST /ha/v2/data. Records are accepted only for entities
+        whose sync_enabled flag is true on the server side (opt-in model).
+        Disabled entities are silently dropped by the server.
 
         Returns True if successful, False otherwise.
         """
@@ -474,7 +497,7 @@ class CloudApiClient:
             try:
                 session = await self._get_session()
                 async with session.post(
-                    f"{self.api_endpoint}/data",
+                    f"{self.api_endpoint}/v2/data",
                     headers=headers,
                     json=payload,
                 ) as response:
@@ -513,6 +536,91 @@ class CloudApiClient:
                 await asyncio.sleep(delay)
 
         logger.error(f"Failed to send batch after {MAX_RETRIES} attempts")
+        return False
+
+    async def send_manifest(self, entities: list[dict[str, Any]]) -> bool:
+        """
+        POST /ha/v2/entities/manifest — send the addon's view of HA entities.
+
+        entities is a list of {entity_id, friendly_name, domain, labels}.
+        The server upserts ha_entities. For rows without a user override,
+        sync_enabled is driven by label presence: labeled entities auto-
+        enable; unlabeled entities default to disabled.
+
+        Returns True on success. Large manifests (>1 request worth) are
+        the caller's responsibility to split; the server caps at 10k.
+        """
+        if not self.auth_token:
+            logger.error("No authentication token configured. Cannot send manifest.")
+            return False
+
+        if not entities:
+            # Empty manifest is still a valid signal — server just no-ops.
+            logger.info("Manifest is empty, skipping send")
+            return True
+
+        headers = {
+            "Authorization": f"Bearer {self.auth_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"entities": entities}
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                session = await self._get_session()
+                async with session.post(
+                    f"{self.api_endpoint}/v2/entities/manifest",
+                    headers=headers,
+                    json=payload,
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        server_entities = data.get("entities", [])
+                        enabled_count = sum(
+                            1 for e in server_entities if e.get("sync_enabled")
+                        )
+                        logger.info(
+                            f"Manifest synced: {len(entities)} sent, "
+                            f"{len(server_entities)} known to server, "
+                            f"{enabled_count} enabled"
+                        )
+                        return True
+                    elif response.status == 429:
+                        retry_after = int(
+                            response.headers.get("Retry-After", RETRY_DELAY_SECONDS)
+                        )
+                        logger.warning(
+                            f"Rate limited (429) sending manifest, retrying after {retry_after}s (attempt {attempt}/{MAX_RETRIES})"
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
+                    elif response.status >= 500:
+                        logger.warning(
+                            f"Server error {response.status} sending manifest on attempt {attempt}/{MAX_RETRIES}"
+                        )
+                    else:
+                        error_text = await response.text()
+                        logger.error(
+                            f"API error {response.status} sending manifest: {error_text}"
+                        )
+                        return False
+
+            except asyncio.TimeoutError:
+                logger.warning(f"Manifest request timeout on attempt {attempt}/{MAX_RETRIES}")
+            except aiohttp.ClientError as e:
+                logger.warning(
+                    f"Network error sending manifest on attempt {attempt}/{MAX_RETRIES}: {e}"
+                )
+            except Exception as e:
+                logger.error(f"Unexpected error sending manifest: {e}")
+                return False
+
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+                logger.info(f"Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
+
+        logger.error(f"Failed to send manifest after {MAX_RETRIES} attempts")
         return False
 
     async def verify_token(self) -> Optional[dict[str, Any]]:
@@ -1109,7 +1217,7 @@ class EventExtractor:
             logger.warning(f"Failed to save local config: {e}")
 
     async def _refresh_config(self) -> None:
-        """Fetch config from API, falling back to local file."""
+        """Fetch config from API, falling back to local file. Also syncs the entity manifest."""
         config = await self.api_client.fetch_config()
         if config is not None:
             self.config = config
@@ -1130,6 +1238,37 @@ class EventExtractor:
         # Check for model updates when config is available
         if self.config:
             await self.model_manager.check_and_update(self.config)
+
+        # Sync entity manifest to the cloud (labels + enable-flag source of truth).
+        # Failure is non-fatal — next refresh cycle retries.
+        try:
+            await self._sync_manifest()
+        except Exception as e:
+            logger.warning(f"Manifest sync failed: {e}")
+
+    async def _sync_manifest(self) -> None:
+        """Read the HA entity registry and POST it as the addon's manifest."""
+        registry = await fetch_entity_registry()
+        if registry is None:
+            logger.info("Entity registry unavailable, skipping manifest sync")
+            return
+
+        entities = []
+        for entry in registry:
+            entity_id = entry.get("entity_id")
+            if not entity_id:
+                continue
+            # HA entity-registry entries have 'labels' (list[str]) from 2024.4+.
+            # Older versions return an empty list or missing key — treat both as [].
+            labels = entry.get("labels") or []
+            entities.append({
+                "entity_id": entity_id,
+                "friendly_name": entry.get("name") or entry.get("original_name"),
+                "domain": entity_id.split(".", 1)[0] if "." in entity_id else None,
+                "labels": list(labels),
+            })
+
+        await self.api_client.send_manifest(entities)
 
     async def sync_cycle(self) -> None:
         """Perform one sync cycle: fetch checkpoint from API, then fetch and send data."""
