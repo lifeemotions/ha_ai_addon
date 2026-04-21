@@ -41,14 +41,19 @@ class TestSyncCycle:
     """Tests for EventExtractor.sync_cycle()."""
 
     @pytest.mark.asyncio
-    async def test_sync_cycle_uses_separate_cursors(self):
+    async def test_sync_cycle_processes_states_only(self):
+        """Sync cycle processes states but NOT events (events aren't stored server-side)."""
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
         extractor.api_client.fetch_checkpoint = AsyncMock(
             return_value={"event": 1705320000.0, "state": 1705319000.0}
         )
+        extractor.api_client.fetch_enabled_entities = AsyncMock(
+            return_value={"sensor.temp"}
+        )
         extractor.running = True
+        extractor._enabled_entity_ids = set()
 
         extractor._process_events = AsyncMock(return_value=1705320060.0)
         extractor._process_states = AsyncMock(return_value=1705320120.0)
@@ -56,26 +61,10 @@ class TestSyncCycle:
         await extractor.sync_cycle()
 
         extractor.api_client.fetch_checkpoint.assert_called_once()
-        extractor._process_events.assert_called_once_with(1705320000.0)
+        extractor.api_client.fetch_enabled_entities.assert_called_once()
+        extractor._process_events.assert_not_called()
         extractor._process_states.assert_called_once_with(1705319000.0)
-
-    @pytest.mark.asyncio
-    async def test_sync_cycle_same_cursors(self):
-        extractor = EventExtractor.__new__(EventExtractor)
-        extractor.db_reader = MagicMock()
-        extractor.api_client = AsyncMock()
-        extractor.api_client.fetch_checkpoint = AsyncMock(
-            return_value={"event": 1705320060.0, "state": 1705320060.0}
-        )
-        extractor.running = True
-
-        extractor._process_events = AsyncMock(return_value=1705320120.0)
-        extractor._process_states = AsyncMock(return_value=1705320120.0)
-
-        await extractor.sync_cycle()
-
-        extractor._process_events.assert_called_once_with(1705320060.0)
-        extractor._process_states.assert_called_once_with(1705320060.0)
+        assert extractor._enabled_entity_ids == {"sensor.temp"}
 
     @pytest.mark.asyncio
     async def test_sync_cycle_skips_when_checkpoint_is_none(self):
@@ -83,33 +72,57 @@ class TestSyncCycle:
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
         extractor.api_client.fetch_checkpoint = AsyncMock(return_value=None)
+        extractor.api_client.fetch_enabled_entities = AsyncMock()
         extractor.running = True
+        extractor._enabled_entity_ids = set()
 
         extractor._process_events = AsyncMock()
         extractor._process_states = AsyncMock()
 
         await extractor.sync_cycle()
 
+        extractor.api_client.fetch_enabled_entities.assert_not_called()
         extractor._process_events.assert_not_called()
         extractor._process_states.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_sync_cycle_with_zero_timestamps(self):
+    async def test_sync_cycle_skips_when_enabled_entities_is_none(self):
+        """If the API call fails, skip the cycle rather than treat it as 'nothing enabled'."""
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
         extractor.api_client.fetch_checkpoint = AsyncMock(
             return_value={"event": 0.0, "state": 0.0}
         )
+        extractor.api_client.fetch_enabled_entities = AsyncMock(return_value=None)
         extractor.running = True
+        extractor._enabled_entity_ids = set()
 
-        extractor._process_events = AsyncMock(return_value=1705320000.0)
-        extractor._process_states = AsyncMock(return_value=1705320000.0)
+        extractor._process_states = AsyncMock()
 
         await extractor.sync_cycle()
 
-        extractor._process_events.assert_called_once_with(0.0)
-        extractor._process_states.assert_called_once_with(0.0)
+        extractor._process_states.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_cycle_skips_when_nothing_enabled(self):
+        """If no entities are enabled, don't bother fetching states."""
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.db_reader = MagicMock()
+        extractor.api_client = AsyncMock()
+        extractor.api_client.fetch_checkpoint = AsyncMock(
+            return_value={"event": 0.0, "state": 0.0}
+        )
+        extractor.api_client.fetch_enabled_entities = AsyncMock(return_value=set())
+        extractor.running = True
+        extractor._enabled_entity_ids = set()
+
+        extractor._process_states = AsyncMock()
+
+        await extractor.sync_cycle()
+
+        extractor._process_states.assert_not_called()
+        assert extractor._enabled_entity_ids == set()
 
 
 class TestProcessEvents:
@@ -191,6 +204,7 @@ class TestProcessStates:
         extractor.api_client = AsyncMock()
         extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
+        extractor._enabled_entity_ids = {"light.living_room"}
 
         result = await extractor._process_states(1705320000.0)
         assert result == 1705320000.0
@@ -204,6 +218,7 @@ class TestProcessStates:
         extractor.api_client.send_batch = AsyncMock(return_value=True)
         extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
+        extractor._enabled_entity_ids = {"light.living_room"}
 
         result = await extractor._process_states(0.0)
         assert result == 1705320000.0  # raw_timestamp from sample record
@@ -217,9 +232,37 @@ class TestProcessStates:
         extractor.api_client.send_batch = AsyncMock(return_value=False)
         extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
+        extractor._enabled_entity_ids = {"light.living_room"}
 
         result = await extractor._process_states(0.0)
         assert result == 0.0
+
+    @pytest.mark.asyncio
+    async def test_disabled_entities_filtered_and_cursor_advances(self):
+        """Records for entities NOT in the enabled set are dropped, cursor still advances."""
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.db_reader = MagicMock()
+        extractor.db_reader.fetch_states.side_effect = [
+            [
+                {"id": 1, "type": "state", "raw_timestamp": 100.0, "entity_id": "light.kitchen", "state": "on"},
+                {"id": 2, "type": "state", "raw_timestamp": 200.0, "entity_id": "sensor.disabled", "state": "22"},
+            ],
+            [],
+        ]
+        extractor.api_client = AsyncMock()
+        extractor.api_client.send_batch = AsyncMock(return_value=True)
+        extractor.data_processor = DataProcessor()
+        extractor.batch_size = 100
+        # Only light.kitchen is enabled.
+        extractor._enabled_entity_ids = {"light.kitchen"}
+
+        result = await extractor._process_states(0.0)
+        assert result == 200.0  # Cursor still advances past the filtered record
+        # send_batch called once, with just the enabled entity's data
+        extractor.api_client.send_batch.assert_called_once()
+        sent_records = extractor.api_client.send_batch.call_args[0][0]
+        assert len(sent_records) == 1
+        assert sent_records[0]["entity_id"] == "light.kitchen"
 
 
 class TestRun:
