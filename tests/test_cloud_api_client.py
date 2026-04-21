@@ -114,6 +114,75 @@ def _make_mock_session(responses, method="post"):
     return mock_session
 
 
+class TestFetchEnabledEntities:
+    """Tests for CloudApiClient.fetch_enabled_entities()."""
+
+    @pytest.mark.asyncio
+    async def test_returns_entity_id_set_on_200(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ingest",
+            auth_token="test-token",
+        )
+        mock_session = _make_mock_session(
+            {
+                "status": 200,
+                "json": {
+                    "entities": [
+                        {"entity_ref": "uuid-1", "entity_id": "sensor.temp", "forward_cursor_ts": None},
+                        {"entity_ref": "uuid-2", "entity_id": "light.kitchen", "forward_cursor_ts": "2026-04-01T00:00:00Z"},
+                    ]
+                },
+            },
+            method="get",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        result = await client.fetch_enabled_entities()
+        assert result == {"sensor.temp", "light.kitchen"}
+
+        call_args = mock_session.get.call_args
+        assert call_args[0][0] == "https://api.test.com/ingest/v2/entities/cursors"
+        assert call_args[1]["headers"]["Authorization"] == "Bearer test-token"
+
+    @pytest.mark.asyncio
+    async def test_empty_list_returns_empty_set(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com",
+            auth_token="test-token",
+        )
+        mock_session = _make_mock_session(
+            {"status": 200, "json": {"entities": []}}, method="get"
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        result = await client.fetch_enabled_entities()
+        assert result == set()
+
+    @pytest.mark.asyncio
+    async def test_no_token_returns_none(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com",
+            auth_token="",
+        )
+        result = await client.fetch_enabled_entities()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_4xx_returns_none_no_retry(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com",
+            auth_token="test-token",
+        )
+        mock_session = _make_mock_session(
+            {"status": 401, "text": "unauthorized"}, method="get"
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        result = await client.fetch_enabled_entities()
+        assert result is None
+        assert mock_session.get.call_count == 1
+
+
 class TestSendManifest:
     """Tests for CloudApiClient.send_manifest()."""
 

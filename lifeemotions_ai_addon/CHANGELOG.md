@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.3.1] - 2026-04-21
+
+### Fixed
+- **Stop sending events to the cloud.** 1.3.0 kept calling
+  `_process_events`, but the v2 `/ha/data` endpoint only stores state
+  records (events have been silently dropped server-side since
+  migration 012). On a fresh addon start that meant the sync loop
+  would rapid-fire through the entire HA event history trying to
+  "catch up" a cursor that never advances persistently — burning
+  rate-limit budget and producing 429s with nothing stored.
+- **Filter state records by the enabled-entity allowlist before
+  sending.** Prior versions relied on the server to drop records for
+  entities where `sync_enabled = false`. That still wasted bandwidth
+  and counted against the site's rate limit. Each sync cycle now
+  fetches the enabled-entity set from `GET /ha/v2/entities/cursors`
+  and drops disabled-entity records locally in the addon.
+- If `fetch_enabled_entities` returns an empty set, the addon logs
+  once and skips the cycle (nothing to sync — user hasn't enabled
+  anything in the console yet).
+
+### Requires
+- Cloud with `/ha/v2/entities/cursors` live (shipped in PR #111).
+
 ## [1.3.0] - 2026-04-20
 
 ### Added

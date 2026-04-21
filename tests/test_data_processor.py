@@ -340,7 +340,7 @@ class TestCursorAdvancement:
 
     @pytest.mark.asyncio
     async def test_cursor_advances_when_all_filtered(self):
-        """When all records are filtered, cursor should still advance."""
+        """When all records are filtered (hardcoded exclusions), cursor should still advance."""
         from unittest.mock import AsyncMock, MagicMock
         from main import EventExtractor
 
@@ -349,8 +349,14 @@ class TestCursorAdvancement:
         extractor.api_client = AsyncMock()
         extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
+        # Include the system_monitor entities in the enabled set so the
+        # hardcoded DataProcessor exclusion is the only filter that drops
+        # them — that's the behavior this test covers.
+        extractor._enabled_entity_ids = {
+            "sensor.system_monitor_cpu",
+            "sensor.system_monitor_memory_use",
+        }
 
-        # All records are system_monitor (will be filtered)
         filtered_states = [
             {"entity_id": "sensor.system_monitor_cpu", "raw_timestamp": 100.0, "state": "50"},
             {"entity_id": "sensor.system_monitor_memory_use", "raw_timestamp": 200.0, "state": "512"},
@@ -372,8 +378,8 @@ class TestCursorAdvancement:
         extractor.api_client = AsyncMock()
         extractor.data_processor = DataProcessor()
         extractor.batch_size = 2
+        extractor._enabled_entity_ids = {"sensor.system_monitor_cpu"}
 
-        # Two full batches of filtered records, then empty
         batch1 = [
             {"entity_id": "sensor.system_monitor_cpu", "raw_timestamp": 100.0, "state": "50"},
             {"entity_id": "sensor.system_monitor_cpu", "raw_timestamp": 200.0, "state": "55"},

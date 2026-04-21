@@ -538,6 +538,82 @@ class CloudApiClient:
         logger.error(f"Failed to send batch after {MAX_RETRIES} attempts")
         return False
 
+    async def fetch_enabled_entities(self) -> Optional[set[str]]:
+        """
+        GET /ha/v2/entities/cursors — returns per-entity cursor state for
+        entities the server has marked sync_enabled=true. We only need the
+        entity_id set here; the per-entity cursor fields aren't consumed yet
+        (the addon still uses a single global cursor).
+
+        Returns:
+            set[str]: entity_ids enabled for sync (empty set is valid).
+            None: request failed — caller should skip the sync cycle rather
+                  than treat "nothing enabled" as the answer.
+        """
+        if not self.auth_token:
+            logger.error("No authentication token configured. Cannot fetch enabled entities.")
+            return None
+
+        headers = {"Authorization": f"Bearer {self.auth_token}"}
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                session = await self._get_session()
+                async with session.get(
+                    f"{self.api_endpoint}/v2/entities/cursors",
+                    headers=headers,
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        entities = data.get("entities") or []
+                        ids = {e["entity_id"] for e in entities if e.get("entity_id")}
+                        logger.info(f"Fetched {len(ids)} enabled entities from API")
+                        return ids
+                    elif response.status == 429:
+                        retry_after = int(
+                            response.headers.get("Retry-After", RETRY_DELAY_SECONDS)
+                        )
+                        logger.warning(
+                            f"Rate limited (429) fetching enabled entities, retrying after {retry_after}s (attempt {attempt}/{MAX_RETRIES})"
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
+                    elif response.status >= 500:
+                        logger.warning(
+                            f"Server error {response.status} fetching enabled entities on attempt {attempt}/{MAX_RETRIES}"
+                        )
+                    else:
+                        error_text = await response.text()
+                        logger.error(
+                            f"API error {response.status} fetching enabled entities: {error_text}"
+                        )
+                        return None
+
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Enabled-entities request timeout on attempt {attempt}/{MAX_RETRIES}"
+                )
+            except aiohttp.ClientError as e:
+                logger.warning(
+                    f"Network error fetching enabled entities on attempt {attempt}/{MAX_RETRIES}: {e}"
+                )
+            except (ValueError, KeyError) as e:
+                logger.error(f"Invalid enabled-entities response: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Unexpected error fetching enabled entities: {e}")
+                return None
+
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+                logger.info(f"Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
+
+        logger.error(
+            f"Failed to fetch enabled entities after {MAX_RETRIES} attempts"
+        )
+        return None
+
     async def send_manifest(self, entities: list[dict[str, Any]]) -> bool:
         """
         POST /ha/v2/entities/manifest — send the addon's view of HA entities.
@@ -1086,6 +1162,10 @@ class EventExtractor:
         self.sync_interval_minutes: Optional[int] = None
         self.batch_size: Optional[int] = None
         self.verified: bool = False
+        # Entity IDs currently enabled for sync on the cloud side. Refreshed
+        # once per sync cycle from /ha/v2/entities/cursors. Empty set means
+        # "no entities enabled" (skip sync entirely).
+        self._enabled_entity_ids: set[str] = set()
 
     async def run(self) -> None:
         """Main run loop with two-loop architecture: heartbeat + sync."""
@@ -1271,18 +1351,40 @@ class EventExtractor:
         await self.api_client.send_manifest(entities)
 
     async def sync_cycle(self) -> None:
-        """Perform one sync cycle: fetch checkpoint from API, then fetch and send data."""
+        """Perform one sync cycle: fetch checkpoint + enabled entities, then fetch and send data."""
         checkpoints = await self.api_client.fetch_checkpoint()
 
         if checkpoints is None:
             logger.warning("Could not fetch checkpoint from API, skipping sync cycle")
             return
 
-        logger.info(f"Starting sync cycle: event_ts={checkpoints['event']}, state_ts={checkpoints['state']}")
+        # Pull the enabled-entity allowlist for this site once per cycle.
+        # State records for disabled entities are filtered here, so we don't
+        # waste bandwidth (and rate-limit budget) sending data the server
+        # will drop.
+        enabled = await self.api_client.fetch_enabled_entities()
+        if enabled is None:
+            logger.warning(
+                "Could not fetch enabled entities from API, skipping sync cycle"
+            )
+            return
+        self._enabled_entity_ids = enabled
 
-        # Process events and states with independent cursors
-        await self._process_events(checkpoints["event"])
+        if not enabled:
+            logger.info(
+                "No entities enabled for sync yet — enable devices in the console "
+                "UI or apply HA labels. Skipping data fetch."
+            )
+            return
 
+        logger.info(
+            f"Starting sync cycle: state_ts={checkpoints['state']}, "
+            f"enabled_entities={len(enabled)}"
+        )
+
+        # Events are not persisted by the cloud — skip the event loop entirely.
+        # (Prior versions of this addon sent events that were silently dropped
+        # server-side, burning rate-limit budget.)
         await self._process_states(checkpoints["state"])
 
     async def _process_events(self, after_timestamp: float) -> float:
@@ -1321,9 +1423,16 @@ class EventExtractor:
         return current_timestamp
 
     async def _process_states(self, after_timestamp: float) -> float:
-        """Process states in batches. Returns the latest processed timestamp."""
+        """Process states in batches. Returns the latest processed timestamp.
+
+        Pre-filters each batch to entities in ``self._enabled_entity_ids`` so
+        we never ship records the server would drop. The cursor still advances
+        past filtered-out records — otherwise the same disabled entities'
+        history would be re-fetched every cycle forever.
+        """
         current_timestamp = after_timestamp
         batch_size = self.batch_size
+        enabled = self._enabled_entity_ids
 
         while True:
             raw_states = self.db_reader.fetch_states(current_timestamp, batch_size)
@@ -1333,7 +1442,17 @@ class EventExtractor:
                 break
 
             batch_max_ts = max(s["raw_timestamp"] for s in raw_states)
-            states = self.data_processor.process_states(raw_states)
+
+            # Narrow to enabled entities BEFORE aggregation. Also cheaper: we
+            # skip bucketing/label-matching for records we'd discard anyway.
+            filtered = [s for s in raw_states if s.get("entity_id") in enabled]
+            skipped = len(raw_states) - len(filtered)
+            if skipped:
+                logger.debug(
+                    f"Dropped {skipped}/{len(raw_states)} state records for disabled entities"
+                )
+
+            states = self.data_processor.process_states(filtered) if filtered else []
 
             if not states:
                 current_timestamp = batch_max_ts
@@ -1345,7 +1464,10 @@ class EventExtractor:
 
             if success:
                 current_timestamp = batch_max_ts
-                logger.info(f"Processed states up to timestamp={current_timestamp}")
+                logger.info(
+                    f"Sent {len(states)} state records up to timestamp={current_timestamp}"
+                    f" ({skipped} skipped for disabled entities)"
+                )
             else:
                 logger.warning("Failed to send states batch, will retry next cycle")
                 break
