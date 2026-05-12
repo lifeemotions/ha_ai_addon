@@ -134,6 +134,7 @@ class TestEndToEndSyncCycle:
 
         # Checkpoint at 0 means "sync everything"
         state.checkpoint_timestamp = 0.0
+        state.entity_cursors = {entity["entity_id"]: 0.0 for entity in SIMULATED_ENTITIES}
 
         # Build components pointing at real DB and mock API
         db_reader = DatabaseReader(db_path=ha_database_path)
@@ -150,9 +151,6 @@ class TestEndToEndSyncCycle:
         await api_client.close()
 
         # --- Assertions ---
-
-        # The mock API should have received the checkpoint check
-        assert state.checkpoint_calls >= 1, "sync_cycle should fetch the checkpoint"
 
         # The mock API should have received at least one batch of records
         assert len(state.received_batches) > 0, (
@@ -197,8 +195,10 @@ class TestEndToEndSyncCycle:
         mock_url, state = mock_cloud_api
         state.reset()
 
-        # Set checkpoint far in the future — no data should be newer than this
-        state.checkpoint_timestamp = 9999999999.0
+        # Set per-entity cursors far in the future — no data should be newer than this
+        state.entity_cursors = {
+            entity["entity_id"]: 9999999999.0 for entity in SIMULATED_ENTITIES
+        }
 
         db_reader = DatabaseReader(db_path=ha_database_path)
         api_client = CloudApiClient(api_endpoint=mock_url, auth_token="e2e-test-token")
@@ -209,12 +209,9 @@ class TestEndToEndSyncCycle:
         await extractor.sync_cycle()
         await api_client.close()
 
-        # Checkpoint was fetched
-        assert state.checkpoint_calls >= 1
-
         # No batches should have been sent (all data is "before" the checkpoint)
         assert len(state.received_batches) == 0, (
-            "No records should be sent when checkpoint is ahead of all data"
+            "No records should be sent when entity cursors are ahead of all data"
         )
 
 
@@ -233,8 +230,24 @@ class TestCloudApiClientE2E:
         result = await client.fetch_checkpoint()
         await client.close()
 
-        assert result == 1706745600.123456
+        assert result == {"event": 1706745600.123456, "state": 1706745600.123456}
         assert state.checkpoint_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_entity_cursors(self, mock_cloud_api):
+        """fetch_entity_cursors() returns per-entity cursor state from the mock server."""
+        mock_url, state = mock_cloud_api
+        state.reset()
+        state.entity_cursors = {
+            "sensor.e2e_temperature": 1706745600.0,
+            "light.e2e_living_room": 0.0,
+        }
+
+        client = CloudApiClient(api_endpoint=mock_url, auth_token="test-token")
+        result = await client.fetch_entity_cursors()
+        await client.close()
+
+        assert result == state.entity_cursors
 
     @pytest.mark.asyncio
     async def test_fetch_config(self, mock_cloud_api):
@@ -314,6 +327,7 @@ class TestErrorScenarios:
         mock_url, state = mock_cloud_api
         state.reset()
         state.checkpoint_timestamp = 0.0
+        state.entity_cursors = {"light.living_room": 0.0, "sensor.temperature": 0.0}
         state.force_error_status = 500
 
         db_reader = DatabaseReader(db_path=ha_db)
@@ -325,9 +339,6 @@ class TestErrorScenarios:
         # Should not raise — errors are handled gracefully
         await extractor.sync_cycle()
         await api_client.close()
-
-        # Checkpoint was fetched successfully
-        assert state.checkpoint_calls >= 1
 
         # No batches should have been accepted (all returned 500)
         assert len(state.received_batches) == 0

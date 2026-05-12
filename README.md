@@ -7,8 +7,9 @@ This Home Assistant Add-on extracts historical device events and state changes f
 ## Features
 
 - **Database Access**: Reads from the Home Assistant SQLite database (`/config/home-assistant_v2.db`)
-- **Checkpoint System**: Fetches the last processed timestamp from the Cloud API to avoid sending duplicate data
-- **Batch Processing**: Efficiently queries data in configurable batch sizes (default: 100 rows)
+- **Entity-Scoped Sync**: Sends the Home Assistant entity registry to the cloud, then syncs only server-enabled entities
+- **Cursor System**: Fetches per-entity forward cursors from the Cloud API to avoid sending duplicate state data
+- **Batch Processing**: Efficiently queries data in server-controlled batch sizes (default: 100 rows)
 - **Resilient API Calls**: Automatic retry logic with exponential backoff for network failures
 - **Bearer Token Authentication**: Secure authentication with the remote API
 
@@ -23,20 +24,44 @@ This Home Assistant Add-on extracts historical device events and state changes f
 | Option                  | Type   | Default | Description                             |
 | ----------------------- | ------ | ------- | --------------------------------------- |
 | `cloud_auth_token`      | string | `""`    | Bearer token for API authentication     |
-| `sync_interval_minutes` | int    | `5`     | How often to sync data (1-1440 minutes) |
-| `batch_size`            | int    | `100`   | Number of records per batch (10-1000)   |
+
+`sync_interval_minutes` and `batch_size` are no longer Home Assistant add-on options. The add-on calls `POST /ha/verify` every 5 minutes and uses the server-controlled sync interval and batch size returned by the console backend.
 
 ### Example Configuration
 
 ```yaml
 cloud_auth_token: "your-secret-token-here"
-sync_interval_minutes: 5
-batch_size: 100
 ```
+
+## Sync Flow
+
+The current add-on uses the v2 entity-scoped sync contract:
+
+1. `POST /ha/verify` verifies the bearer token and returns server-controlled sync settings.
+2. `GET /ha/config` fetches model, filter, and prediction configuration and caches it locally.
+3. `POST /ha/v2/entities/manifest` sends Home Assistant entity IDs, friendly names, domains, and labels.
+4. `GET /ha/v2/entities/cursors` returns only sync-enabled entities and their forward cursors.
+5. The add-on reads states from SQLite per enabled entity and sends them with cursor updates to `POST /ha/v2/data`.
+
+Home Assistant events are read by older compatibility paths, but the current v2 sync loop persists state records only. Enable entities through the console UI or by applying Home Assistant labels that the console treats as sync-enabled.
+
+### QA Expectations
+
+- Startup should verify the token, fetch config, and attempt a manifest sync.
+- If `GET /ha/v2/entities/cursors` returns no entities, the add-on should log
+  that nothing is enabled and skip the SQLite state read for that cycle.
+- State sync should run per enabled entity and send `forward_cursor_ts` updates
+  in the same `/ha/v2/data` request as the accepted batch.
+- Disabled entities should not be sent by the current add-on loop; if they are
+  sent by a test harness, the cloud should report them as dropped.
+- Event records are compatibility examples only for the current v2 release; the
+  active sync loop sends state records.
 
 ## Data Schema
 
-The add-on sends two types of records to the Cloud API: **states** (entity state changes) and **events** (system/automation events).
+The active v2 sync loop sends **states** (entity state changes) to the Cloud API.
+The record envelope is still event/state-shaped for compatibility with older
+paths and tests.
 
 > **Note:** Since HA 2023.4+, `state_changed` events are no longer recorded in the events table. State changes are only stored in the states table. The events table contains system events like `homeassistant_start`, `automation_triggered`, `call_service`, etc.
 
@@ -89,17 +114,22 @@ The add-on sends two types of records to the Cloud API: **states** (entity state
 }
 ```
 
-## Checkpoint Persistence
+## Cursor Persistence
 
-The add-on fetches the last processed timestamp from the Cloud API on each sync cycle. The API returns:
+The add-on fetches enabled entities and their per-entity forward cursors from the Cloud API on each sync cycle. The API returns:
 
 ```json
 {
-  "last_timestamp": 1734605400.0
+  "entities": [
+    {
+      "entity_id": "sensor.kitchen_temperature",
+      "forward_cursor_ts": "2024-01-31T12:00:00.000Z"
+    }
+  ]
 }
 ```
 
-All events and states with timestamps after this value are fetched and sent. This ensures no duplicate data is sent across sync cycles.
+For each enabled entity, states with timestamps after `forward_cursor_ts` are fetched and sent. After a successful batch, the add-on sends updated cursor values in the same `/ha/v2/data` request.
 
 ## Logs
 
@@ -139,8 +169,7 @@ Settings → Add-ons → HA Event Extractor → Logs
 ```bash
 # Set environment variables
 export CLOUD_AUTH_TOKEN="test-token"
-export SYNC_INTERVAL_MINUTES=1
-export BATCH_SIZE=10
+export API_ENDPOINT="https://api.life-emotions.com/ha"
 
 # Run the script
 python main.py
