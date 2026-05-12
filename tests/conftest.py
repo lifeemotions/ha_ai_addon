@@ -275,6 +275,10 @@ class MockCloudApiState:
         self.verify_status: int = 200
         self.received_auth_headers: list[str | None] = []
         self.force_error_status: int | None = None
+        self.entity_cursors: dict[str, float | None] = {
+            "light.living_room": 0.0,
+            "sensor.temperature": 0.0,
+        }
 
     def reset(self):
         self.received_batches.clear()
@@ -287,6 +291,10 @@ class MockCloudApiState:
         self.verify_status = 200
         self.received_auth_headers.clear()
         self.force_error_status = None
+        self.entity_cursors = {
+            "light.living_room": 0.0,
+            "sensor.temperature": 0.0,
+        }
 
 
 def _create_mock_cloud_app(state: MockCloudApiState) -> web.Application:
@@ -318,6 +326,19 @@ def _create_mock_cloud_app(state: MockCloudApiState) -> web.Application:
             status=201,
         )
 
+    async def handle_get_entity_cursors(request: web.Request) -> web.Response:
+        """GET /ha/v2/entities/cursors — return enabled entity cursor state."""
+        state.received_auth_headers.append(request.headers.get("Authorization"))
+        entities = []
+        for idx, (entity_id, cursor_ts) in enumerate(state.entity_cursors.items(), start=1):
+            entities.append({
+                "entity_ref": f"mock-{idx}",
+                "entity_id": entity_id,
+                "sync_enabled": True,
+                "forward_cursor_ts": cursor_ts,
+            })
+        return web.json_response({"entities": entities})
+
     async def handle_get_config(request: web.Request) -> web.Response:
         """GET /ha/config — return remote config."""
         state.config_calls += 1
@@ -333,6 +354,8 @@ def _create_mock_cloud_app(state: MockCloudApiState) -> web.Application:
     app = web.Application()
     app.router.add_get("/ha/data", handle_get_data)
     app.router.add_post("/ha/data", handle_post_data)
+    app.router.add_post("/ha/v2/data", handle_post_data)
+    app.router.add_get("/ha/v2/entities/cursors", handle_get_entity_cursors)
     app.router.add_get("/ha/config", handle_get_config)
     app.router.add_post("/ha/verify", handle_post_verify)
     return app

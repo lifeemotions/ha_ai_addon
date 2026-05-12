@@ -204,6 +204,32 @@ class TestFetchStates:
         assert states[0]["raw_timestamp"] == 1705320000.0
 
 
+class TestFetchEntityStates:
+    """Tests for DatabaseReader.fetch_entity_states() per-entity cursor reads."""
+
+    def test_fetches_only_requested_entity_after_cursor(self, ha_db):
+        reader = DatabaseReader(db_path=ha_db)
+        states = reader.fetch_entity_states("light.living_room", after_timestamp=0.0)
+        assert [s["entity_id"] for s in states] == ["light.living_room", "light.living_room"]
+        assert [s["raw_timestamp"] for s in states] == [1705320000.0, 1705320120.0]
+
+    def test_fetches_requested_entity_after_timestamp(self, ha_db):
+        reader = DatabaseReader(db_path=ha_db)
+        states = reader.fetch_entity_states(
+            "light.living_room", after_timestamp=1705320000.0
+        )
+        assert len(states) == 1
+        assert states[0]["raw_timestamp"] == 1705320120.0
+
+    def test_fetch_entity_states_respects_batch_size(self, ha_db):
+        reader = DatabaseReader(db_path=ha_db)
+        states = reader.fetch_entity_states(
+            "light.living_room", after_timestamp=0.0, batch_size=1
+        )
+        assert len(states) == 1
+        assert states[0]["raw_timestamp"] == 1705320000.0
+
+
 class TestParseEventRow:
     """Tests for DatabaseReader._parse_event_row()."""
 

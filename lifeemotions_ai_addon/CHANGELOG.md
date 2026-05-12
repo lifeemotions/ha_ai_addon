@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.3.2] - 2026-05-12
+
+### Fixed
+- **Make the per-entity cursor sync package visible to Home Assistant.**
+  The add-on package version is bumped from `1.3.1` so Supervisor can
+  detect and install the build containing the entity-scoped SQLite reads
+  and `/ha/v2/data` cursor updates. Browser QA should no longer be asked
+  to rebuild an add-on that still advertises the already-installed version.
+- Sync now reads states per enabled entity using the server-provided
+  `forward_cursor_ts`, preventing the one-enabled-entity path from scanning
+  unrelated global recorder history in repeated 100-row batches.
+- Successful sync sends cursor-only or record-plus-cursor updates back to
+  the cloud so `ha_entity_sync_state.forward_cursor_ts` advances after each
+  accepted batch.
+
+### Requires
+- Cloud with `GET /ha/v2/entities/cursors` and `POST /ha/v2/data` cursor
+  updates live.
+
 ## [1.3.1] - 2026-04-21
 
 ### Fixed

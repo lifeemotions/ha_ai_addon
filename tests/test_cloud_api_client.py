@@ -183,6 +183,59 @@ class TestFetchEnabledEntities:
         assert mock_session.get.call_count == 1
 
 
+class TestFetchEntityCursors:
+    """Contract tests for CloudApiClient.fetch_entity_cursors()."""
+
+    @pytest.mark.asyncio
+    async def test_returns_entity_cursor_map_on_200(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ingest",
+            auth_token="test-token",
+        )
+        mock_session = _make_mock_session(
+            {
+                "status": 200,
+                "json": {
+                    "entities": [
+                        {"entity_ref": "uuid-1", "entity_id": "sensor.temp", "forward_cursor_ts": None},
+                        {"entity_ref": "uuid-2", "entity_id": "light.kitchen", "forward_cursor_ts": "2026-04-01T00:00:00Z"},
+                        {"entity_ref": "uuid-3", "entity_id": "sensor.disabled", "sync_enabled": False, "forward_cursor_ts": "2026-04-01T00:00:00Z"},
+                    ]
+                },
+            },
+            method="get",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        result = await client.fetch_entity_cursors()
+
+        assert result == {
+            "sensor.temp": 0.0,
+            "light.kitchen": 1775001600.0,
+        }
+        call_args = mock_session.get.call_args
+        assert call_args[0][0] == "https://api.test.com/ingest/v2/entities/cursors"
+        assert call_args[1]["headers"]["Authorization"] == "Bearer test-token"
+
+    @pytest.mark.asyncio
+    async def test_invalid_cursor_returns_none(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ingest",
+            auth_token="test-token",
+        )
+        mock_session = _make_mock_session(
+            {
+                "status": 200,
+                "json": {"entities": [{"entity_id": "sensor.temp", "forward_cursor_ts": {"bad": "shape"}}]},
+            },
+            method="get",
+        )
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        result = await client.fetch_entity_cursors()
+        assert result is None
+
+
 class TestSendManifest:
     """Tests for CloudApiClient.send_manifest()."""
 
@@ -263,6 +316,26 @@ class TestSendBatch:
         assert result is True
 
     @pytest.mark.asyncio
+    async def test_cursor_only_batch_sends_request(self):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ingest",
+            auth_token="test-token-1234",
+        )
+
+        mock_session = _make_mock_session({"status": 201})
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        cursors = {"sensor.temp": {"forward_cursor_ts": "2026-04-01T00:00:00+00:00"}}
+        result = await client.send_batch([], cursors=cursors)
+        assert result is True
+
+        call_args = mock_session.post.call_args
+        assert call_args[0][0] == "https://api.test.com/ingest/v2/data"
+        payload = call_args[1]["json"]
+        assert payload["records"] == []
+        assert payload["cursors"] == cursors
+
+    @pytest.mark.asyncio
     async def test_no_auth_token_returns_false(self):
         client = CloudApiClient(
             api_endpoint="https://api.test.com",
@@ -294,6 +367,24 @@ class TestSendBatch:
         assert "records" in payload
         assert payload["source"] == "home_assistant"
         assert "sent_at" in payload
+
+    @pytest.mark.asyncio
+    async def test_send_batch_includes_cursor_updates(self, sample_event_records):
+        client = CloudApiClient(
+            api_endpoint="https://api.test.com/ingest",
+            auth_token="test-token-1234",
+        )
+
+        mock_session = _make_mock_session({"status": 201})
+        client._get_session = AsyncMock(return_value=mock_session)
+
+        cursors = {"automation.morning": {"forward_cursor_ts": "2024-01-15T12:01:00+00:00"}}
+        result = await client.send_batch(sample_event_records, cursors=cursors)
+        assert result is True
+
+        payload = mock_session.post.call_args[1]["json"]
+        assert payload["records"] == sample_event_records
+        assert payload["cursors"] == cursors
 
     @pytest.mark.asyncio
     async def test_successful_send_201(self, sample_event_records):

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 import pytest
 
 from const import CONFIG_REFRESH_INTERVAL_MINUTES
-from main import DataProcessor, EventExtractor
+from main import CloudApiClient, DataProcessor, EventExtractor
 
 
 class TestEventExtractorInit:
@@ -46,63 +46,45 @@ class TestSyncCycle:
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
-        extractor.api_client.fetch_checkpoint = AsyncMock(
-            return_value={"event": 1705320000.0, "state": 1705319000.0}
-        )
-        extractor.api_client.fetch_enabled_entities = AsyncMock(
-            return_value={"sensor.temp"}
+        extractor.api_client.fetch_entity_cursors = AsyncMock(
+            return_value={"sensor.temp": 1705319000.0}
         )
         extractor.running = True
         extractor._enabled_entity_ids = set()
+        extractor._entity_cursors = {}
 
         extractor._process_events = AsyncMock(return_value=1705320060.0)
         extractor._process_states = AsyncMock(return_value=1705320120.0)
+        extractor._process_entity_states = AsyncMock(return_value={"sensor.temp": 1705320120.0})
 
         await extractor.sync_cycle()
 
-        extractor.api_client.fetch_checkpoint.assert_called_once()
-        extractor.api_client.fetch_enabled_entities.assert_called_once()
+        extractor.api_client.fetch_entity_cursors.assert_called_once()
         extractor._process_events.assert_not_called()
-        extractor._process_states.assert_called_once_with(1705319000.0)
+        extractor._process_states.assert_not_called()
+        extractor._process_entity_states.assert_called_once_with({"sensor.temp": 1705319000.0})
         assert extractor._enabled_entity_ids == {"sensor.temp"}
+        assert extractor._entity_cursors == {"sensor.temp": 1705319000.0}
 
     @pytest.mark.asyncio
-    async def test_sync_cycle_skips_when_checkpoint_is_none(self):
+    async def test_sync_cycle_skips_when_entity_cursors_is_none(self):
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
-        extractor.api_client.fetch_checkpoint = AsyncMock(return_value=None)
-        extractor.api_client.fetch_enabled_entities = AsyncMock()
+        extractor.api_client.fetch_entity_cursors = AsyncMock(return_value=None)
         extractor.running = True
         extractor._enabled_entity_ids = set()
+        extractor._entity_cursors = {}
 
         extractor._process_events = AsyncMock()
         extractor._process_states = AsyncMock()
+        extractor._process_entity_states = AsyncMock()
 
         await extractor.sync_cycle()
 
-        extractor.api_client.fetch_enabled_entities.assert_not_called()
         extractor._process_events.assert_not_called()
         extractor._process_states.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_sync_cycle_skips_when_enabled_entities_is_none(self):
-        """If the API call fails, skip the cycle rather than treat it as 'nothing enabled'."""
-        extractor = EventExtractor.__new__(EventExtractor)
-        extractor.db_reader = MagicMock()
-        extractor.api_client = AsyncMock()
-        extractor.api_client.fetch_checkpoint = AsyncMock(
-            return_value={"event": 0.0, "state": 0.0}
-        )
-        extractor.api_client.fetch_enabled_entities = AsyncMock(return_value=None)
-        extractor.running = True
-        extractor._enabled_entity_ids = set()
-
-        extractor._process_states = AsyncMock()
-
-        await extractor.sync_cycle()
-
-        extractor._process_states.assert_not_called()
+        extractor._process_entity_states.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sync_cycle_skips_when_nothing_enabled(self):
@@ -110,19 +92,20 @@ class TestSyncCycle:
         extractor = EventExtractor.__new__(EventExtractor)
         extractor.db_reader = MagicMock()
         extractor.api_client = AsyncMock()
-        extractor.api_client.fetch_checkpoint = AsyncMock(
-            return_value={"event": 0.0, "state": 0.0}
-        )
-        extractor.api_client.fetch_enabled_entities = AsyncMock(return_value=set())
+        extractor.api_client.fetch_entity_cursors = AsyncMock(return_value={})
         extractor.running = True
         extractor._enabled_entity_ids = set()
+        extractor._entity_cursors = {}
 
         extractor._process_states = AsyncMock()
+        extractor._process_entity_states = AsyncMock()
 
         await extractor.sync_cycle()
 
         extractor._process_states.assert_not_called()
+        extractor._process_entity_states.assert_not_called()
         assert extractor._enabled_entity_ids == set()
+        assert extractor._entity_cursors == {}
 
 
 class TestProcessEvents:
@@ -146,6 +129,7 @@ class TestProcessEvents:
         extractor.db_reader = MagicMock()
         extractor.db_reader.fetch_events.side_effect = [sample_event_records, []]
         extractor.api_client = AsyncMock()
+        extractor.api_client._format_cursor_timestamp = CloudApiClient._format_cursor_timestamp
         extractor.api_client.send_batch = AsyncMock(return_value=True)
         extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
@@ -159,6 +143,7 @@ class TestProcessEvents:
         extractor.db_reader = MagicMock()
         extractor.db_reader.fetch_events.return_value = sample_event_records
         extractor.api_client = AsyncMock()
+        extractor.api_client._format_cursor_timestamp = CloudApiClient._format_cursor_timestamp
         extractor.api_client.send_batch = AsyncMock(return_value=False)
         extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
@@ -186,6 +171,7 @@ class TestProcessEvents:
 
         extractor.db_reader.fetch_events.side_effect = [batch1, batch2]
         extractor.api_client = AsyncMock()
+        extractor.api_client._format_cursor_timestamp = CloudApiClient._format_cursor_timestamp
         extractor.api_client.send_batch = AsyncMock(return_value=True)
 
         result = await extractor._process_events(0.0)
@@ -250,6 +236,7 @@ class TestProcessStates:
             [],
         ]
         extractor.api_client = AsyncMock()
+        extractor.api_client._format_cursor_timestamp = CloudApiClient._format_cursor_timestamp
         extractor.api_client.send_batch = AsyncMock(return_value=True)
         extractor.data_processor = DataProcessor()
         extractor.batch_size = 100
@@ -263,6 +250,94 @@ class TestProcessStates:
         sent_records = extractor.api_client.send_batch.call_args[0][0]
         assert len(sent_records) == 1
         assert sent_records[0]["entity_id"] == "light.kitchen"
+
+
+class TestProcessEntityStates:
+    """Tests for EventExtractor per-entity cursor processing."""
+
+    @pytest.mark.asyncio
+    async def test_processes_each_entity_from_its_own_cursor(self):
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.db_reader = MagicMock()
+        extractor.db_reader.fetch_entity_states.side_effect = [
+            [{"id": 1, "type": "state", "raw_timestamp": 100.0, "entity_id": "light.kitchen", "state": "on"}],
+            [{"id": 2, "type": "state", "raw_timestamp": 250.0, "entity_id": "sensor.temp", "state": "21"}],
+        ]
+        extractor.api_client = AsyncMock()
+        extractor.api_client._format_cursor_timestamp = CloudApiClient._format_cursor_timestamp
+        extractor.api_client.send_batch = AsyncMock(return_value=True)
+        extractor.data_processor = DataProcessor()
+        extractor.batch_size = 100
+
+        result = await extractor._process_entity_states({
+            "light.kitchen": 90.0,
+            "sensor.temp": 200.0,
+        })
+
+        assert result == {"light.kitchen": 100.0, "sensor.temp": 250.0}
+        assert extractor.db_reader.fetch_entity_states.call_args_list[0][0] == (
+            "light.kitchen",
+            90.0,
+            100,
+        )
+        assert extractor.db_reader.fetch_entity_states.call_args_list[1][0] == (
+            "sensor.temp",
+            200.0,
+            100,
+        )
+        assert extractor.api_client.send_batch.call_count == 2
+        first_cursor = extractor.api_client.send_batch.call_args_list[0][1]["cursors"]
+        second_cursor = extractor.api_client.send_batch.call_args_list[1][1]["cursors"]
+        assert first_cursor == {
+            "light.kitchen": {"forward_cursor_ts": "1970-01-01T00:01:40+00:00"}
+        }
+        assert second_cursor == {
+            "sensor.temp": {"forward_cursor_ts": "1970-01-01T00:04:10+00:00"}
+        }
+
+    @pytest.mark.asyncio
+    async def test_entity_cursor_does_not_advance_on_send_failure(self):
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.db_reader = MagicMock()
+        extractor.db_reader.fetch_entity_states.return_value = [
+            {"id": 1, "type": "state", "raw_timestamp": 100.0, "entity_id": "light.kitchen", "state": "on"},
+        ]
+        extractor.api_client = AsyncMock()
+        extractor.api_client._format_cursor_timestamp = CloudApiClient._format_cursor_timestamp
+        extractor.api_client.send_batch = AsyncMock(return_value=False)
+        extractor.data_processor = DataProcessor()
+        extractor.batch_size = 100
+
+        result = await extractor._process_states_for_entity("light.kitchen", 90.0)
+
+        assert result == 90.0
+
+    @pytest.mark.asyncio
+    async def test_filtered_entity_sends_cursor_only_update(self):
+        extractor = EventExtractor.__new__(EventExtractor)
+        extractor.db_reader = MagicMock()
+        extractor.db_reader.fetch_entity_states.return_value = [
+            {"id": 1, "type": "state", "raw_timestamp": 100.0, "entity_id": "sensor.system_monitor_cpu", "state": "20"},
+        ]
+        extractor.api_client = AsyncMock()
+        extractor.api_client._format_cursor_timestamp = CloudApiClient._format_cursor_timestamp
+        extractor.api_client.send_batch = AsyncMock(return_value=True)
+        extractor.data_processor = DataProcessor()
+        extractor.batch_size = 100
+
+        result = await extractor._process_states_for_entity(
+            "sensor.system_monitor_cpu", 90.0
+        )
+
+        assert result == 100.0
+        extractor.api_client.send_batch.assert_called_once_with(
+            [],
+            cursors={
+                "sensor.system_monitor_cpu": {
+                    "forward_cursor_ts": "1970-01-01T00:01:40+00:00"
+                }
+            },
+        )
 
 
 class TestRun:

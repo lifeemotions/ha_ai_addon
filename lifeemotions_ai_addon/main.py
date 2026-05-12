@@ -124,6 +124,27 @@ class DatabaseReader:
 
         Uses the newer HA database schema where attributes are in a separate table.
         """
+        return self._fetch_states(after_timestamp, batch_size)
+
+    def fetch_entity_states(
+        self, entity_id: str, after_timestamp: float, batch_size: int = 100
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch states for one HA entity with last_updated_ts > after_timestamp.
+
+        This is the per-entity cursor path used by v2 sync. It keeps reads
+        bounded to the server's cursor for that entity instead of applying one
+        global checkpoint across all entities.
+        """
+        return self._fetch_states(after_timestamp, batch_size, entity_id=entity_id)
+
+    def _fetch_states(
+        self,
+        after_timestamp: float,
+        batch_size: int = 100,
+        entity_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch state rows, optionally constrained to one entity_id."""
         states = []
         try:
             with self._get_connection() as conn:
@@ -141,10 +162,18 @@ class DatabaseReader:
                     LEFT JOIN states_meta sm ON s.metadata_id = sm.metadata_id
                     LEFT JOIN state_attributes sa ON s.attributes_id = sa.attributes_id
                     WHERE s.last_updated_ts > ?
+                    {entity_filter}
                     ORDER BY s.last_updated_ts ASC
                     LIMIT ?
-                """
-                cursor.execute(query, (after_timestamp, batch_size))
+                """.format(
+                    entity_filter="AND sm.entity_id = ?" if entity_id else ""
+                )
+                params: tuple[Any, ...]
+                if entity_id:
+                    params = (after_timestamp, entity_id, batch_size)
+                else:
+                    params = (after_timestamp, batch_size)
+                cursor.execute(query, params)
                 rows = cursor.fetchall()
 
                 for row in rows:
@@ -152,7 +181,12 @@ class DatabaseReader:
                     if state:
                         states.append(state)
 
-                logger.info(f"Fetched {len(states)} states from database")
+                if entity_id:
+                    logger.info(
+                        f"Fetched {len(states)} states for {entity_id} from database"
+                    )
+                else:
+                    logger.info(f"Fetched {len(states)} states from database")
 
         except sqlite3.OperationalError as e:
             if "locked" in str(e).lower() or "busy" in str(e).lower():
@@ -305,10 +339,11 @@ class DataProcessor:
         for records in numeric_buckets.values():
             values = [float(r["state"]) for r in records]
             avg_val = sum(values) / len(values)
-            template = records[-1]
-            max_ts = max(r["raw_timestamp"] for r in records)
+            template = max(records, key=lambda r: r["raw_timestamp"])
+            max_ts = template["raw_timestamp"]
 
             aggregated.append({
+                "id": template.get("id"),
                 "type": "state",
                 "timestamp": datetime.fromtimestamp(max_ts, tz=timezone.utc).isoformat(),
                 "raw_timestamp": max_ts,
@@ -372,6 +407,32 @@ class CloudApiClient:
         self.auth_token = auth_token
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self._session: Optional[aiohttp.ClientSession] = None
+
+    @staticmethod
+    def _parse_cursor_timestamp(value: Any) -> float:
+        """Convert cloud cursor timestamps (ISO-8601, numeric, or null) to epoch seconds."""
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return 0.0
+            try:
+                return float(stripped)
+            except ValueError:
+                normalized = stripped.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(normalized)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp()
+        raise ValueError(f"Unsupported cursor timestamp: {value!r}")
+
+    @staticmethod
+    def _format_cursor_timestamp(value: float) -> str:
+        """Convert epoch seconds to the cloud cursor ISO-8601 format."""
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create a reusable HTTP session."""
@@ -465,17 +526,23 @@ class CloudApiClient:
         logger.error(f"Failed to fetch checkpoint after {MAX_RETRIES} attempts")
         return None
 
-    async def send_batch(self, records: list[dict[str, Any]]) -> bool:
+    async def send_batch(
+        self,
+        records: list[dict[str, Any]],
+        cursors: Optional[dict[str, dict[str, Optional[str]]]] = None,
+    ) -> bool:
         """
         Send a batch of records to the Cloud API via v2.
 
         Posts to POST /ha/v2/data. Records are accepted only for entities
         whose sync_enabled flag is true on the server side (opt-in model).
         Disabled entities are silently dropped by the server.
+        Cursor updates are sent in the same request so the server-owned
+        per-entity forward cursor advances only after a successful POST.
 
         Returns True if successful, False otherwise.
         """
-        if not records:
+        if not records and not cursors:
             return True
 
         if not self.auth_token:
@@ -492,6 +559,8 @@ class CloudApiClient:
             "source": "home_assistant",
             "sent_at": datetime.now(timezone.utc).isoformat(),
         }
+        if cursors:
+            payload["cursors"] = cursors
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -502,7 +571,10 @@ class CloudApiClient:
                     json=payload,
                 ) as response:
                     if response.status == 200 or response.status == 201:
-                        logger.info(f"Successfully sent {len(records)} records to API")
+                        logger.info(
+                            f"Successfully sent {len(records)} records "
+                            f"and {len(cursors or {})} cursor updates to API"
+                        )
                         return True
                     elif response.status == 429:
                         retry_after = int(response.headers.get("Retry-After", RETRY_DELAY_SECONDS))
@@ -538,20 +610,18 @@ class CloudApiClient:
         logger.error(f"Failed to send batch after {MAX_RETRIES} attempts")
         return False
 
-    async def fetch_enabled_entities(self) -> Optional[set[str]]:
+    async def fetch_entity_cursors(self) -> Optional[dict[str, float]]:
         """
-        GET /ha/v2/entities/cursors — returns per-entity cursor state for
-        entities the server has marked sync_enabled=true. We only need the
-        entity_id set here; the per-entity cursor fields aren't consumed yet
-        (the addon still uses a single global cursor).
+        GET /ha/v2/entities/cursors — returns per-entity forward cursors for
+        sync-enabled entities.
 
         Returns:
-            set[str]: entity_ids enabled for sync (empty set is valid).
+            dict[str, float]: entity_id -> cursor epoch seconds.
             None: request failed — caller should skip the sync cycle rather
                   than treat "nothing enabled" as the answer.
         """
         if not self.auth_token:
-            logger.error("No authentication token configured. Cannot fetch enabled entities.")
+            logger.error("No authentication token configured. Cannot fetch entity cursors.")
             return None
 
         headers = {"Authorization": f"Bearer {self.auth_token}"}
@@ -566,42 +636,51 @@ class CloudApiClient:
                     if response.status == 200:
                         data = await response.json()
                         entities = data.get("entities") or []
-                        ids = {e["entity_id"] for e in entities if e.get("entity_id")}
-                        logger.info(f"Fetched {len(ids)} enabled entities from API")
-                        return ids
+                        cursors: dict[str, float] = {}
+                        for entity in entities:
+                            entity_id = entity.get("entity_id")
+                            if not entity_id:
+                                continue
+                            if entity.get("sync_enabled") is False:
+                                continue
+                            cursors[entity_id] = self._parse_cursor_timestamp(
+                                entity.get("forward_cursor_ts")
+                            )
+                        logger.info(f"Fetched {len(cursors)} entity cursors from API")
+                        return cursors
                     elif response.status == 429:
                         retry_after = int(
                             response.headers.get("Retry-After", RETRY_DELAY_SECONDS)
                         )
                         logger.warning(
-                            f"Rate limited (429) fetching enabled entities, retrying after {retry_after}s (attempt {attempt}/{MAX_RETRIES})"
+                            f"Rate limited (429) fetching entity cursors, retrying after {retry_after}s (attempt {attempt}/{MAX_RETRIES})"
                         )
                         await asyncio.sleep(retry_after)
                         continue
                     elif response.status >= 500:
                         logger.warning(
-                            f"Server error {response.status} fetching enabled entities on attempt {attempt}/{MAX_RETRIES}"
+                            f"Server error {response.status} fetching entity cursors on attempt {attempt}/{MAX_RETRIES}"
                         )
                     else:
                         error_text = await response.text()
                         logger.error(
-                            f"API error {response.status} fetching enabled entities: {error_text}"
+                            f"API error {response.status} fetching entity cursors: {error_text}"
                         )
                         return None
 
             except asyncio.TimeoutError:
                 logger.warning(
-                    f"Enabled-entities request timeout on attempt {attempt}/{MAX_RETRIES}"
+                    f"Entity-cursors request timeout on attempt {attempt}/{MAX_RETRIES}"
                 )
             except aiohttp.ClientError as e:
                 logger.warning(
-                    f"Network error fetching enabled entities on attempt {attempt}/{MAX_RETRIES}: {e}"
+                    f"Network error fetching entity cursors on attempt {attempt}/{MAX_RETRIES}: {e}"
                 )
             except (ValueError, KeyError) as e:
-                logger.error(f"Invalid enabled-entities response: {e}")
+                logger.error(f"Invalid entity-cursors response: {e}")
                 return None
             except Exception as e:
-                logger.error(f"Unexpected error fetching enabled entities: {e}")
+                logger.error(f"Unexpected error fetching entity cursors: {e}")
                 return None
 
             if attempt < MAX_RETRIES:
@@ -610,9 +689,16 @@ class CloudApiClient:
                 await asyncio.sleep(delay)
 
         logger.error(
-            f"Failed to fetch enabled entities after {MAX_RETRIES} attempts"
+            f"Failed to fetch entity cursors after {MAX_RETRIES} attempts"
         )
         return None
+
+    async def fetch_enabled_entities(self) -> Optional[set[str]]:
+        """Backward-compatible helper returning only the enabled entity ids."""
+        cursors = await self.fetch_entity_cursors()
+        if cursors is None:
+            return None
+        return set(cursors)
 
     async def send_manifest(self, entities: list[dict[str, Any]]) -> bool:
         """
@@ -1162,9 +1248,9 @@ class EventExtractor:
         self.sync_interval_minutes: Optional[int] = None
         self.batch_size: Optional[int] = None
         self.verified: bool = False
-        # Entity IDs currently enabled for sync on the cloud side. Refreshed
-        # once per sync cycle from /ha/v2/entities/cursors. Empty set means
-        # "no entities enabled" (skip sync entirely).
+        # Per-entity forward cursors from /ha/v2/entities/cursors. Empty dict
+        # means "no entities enabled" (skip sync entirely).
+        self._entity_cursors: dict[str, float] = {}
         self._enabled_entity_ids: set[str] = set()
 
     async def run(self) -> None:
@@ -1351,26 +1437,17 @@ class EventExtractor:
         await self.api_client.send_manifest(entities)
 
     async def sync_cycle(self) -> None:
-        """Perform one sync cycle: fetch checkpoint + enabled entities, then fetch and send data."""
-        checkpoints = await self.api_client.fetch_checkpoint()
-
-        if checkpoints is None:
-            logger.warning("Could not fetch checkpoint from API, skipping sync cycle")
-            return
-
-        # Pull the enabled-entity allowlist for this site once per cycle.
-        # State records for disabled entities are filtered here, so we don't
-        # waste bandwidth (and rate-limit budget) sending data the server
-        # will drop.
-        enabled = await self.api_client.fetch_enabled_entities()
-        if enabled is None:
+        """Perform one sync cycle using server-owned per-entity cursors."""
+        entity_cursors = await self.api_client.fetch_entity_cursors()
+        if entity_cursors is None:
             logger.warning(
-                "Could not fetch enabled entities from API, skipping sync cycle"
+                "Could not fetch entity cursors from API, skipping sync cycle"
             )
             return
-        self._enabled_entity_ids = enabled
+        self._entity_cursors = entity_cursors
+        self._enabled_entity_ids = set(entity_cursors)
 
-        if not enabled:
+        if not entity_cursors:
             logger.info(
                 "No entities enabled for sync yet — enable devices in the console "
                 "UI or apply HA labels. Skipping data fetch."
@@ -1378,19 +1455,18 @@ class EventExtractor:
             return
 
         logger.info(
-            f"Starting sync cycle: state_ts={checkpoints['state']}, "
-            f"enabled_entities={len(enabled)}"
+            f"Starting per-entity sync cycle: enabled_entities={len(entity_cursors)}"
         )
 
         # Events are not persisted by the cloud — skip the event loop entirely.
         # (Prior versions of this addon sent events that were silently dropped
         # server-side, burning rate-limit budget.)
-        await self._process_states(checkpoints["state"])
+        await self._process_entity_states(entity_cursors)
 
     async def _process_events(self, after_timestamp: float) -> float:
         """Process events in batches. Returns the latest processed timestamp."""
         current_timestamp = after_timestamp
-        batch_size = self.batch_size
+        batch_size = self.batch_size or 100
 
         while True:
             raw_events = self.db_reader.fetch_events(current_timestamp, batch_size)
@@ -1422,6 +1498,58 @@ class EventExtractor:
 
         return current_timestamp
 
+    async def _process_entity_states(self, entity_cursors: dict[str, float]) -> dict[str, float]:
+        """Process state history independently for each enabled entity cursor."""
+        processed: dict[str, float] = {}
+        for entity_id, after_timestamp in sorted(entity_cursors.items()):
+            processed[entity_id] = await self._process_states_for_entity(
+                entity_id, after_timestamp
+            )
+        return processed
+
+    async def _process_states_for_entity(self, entity_id: str, after_timestamp: float) -> float:
+        """Process one entity's state rows from its cloud-owned cursor."""
+        current_timestamp = after_timestamp
+        batch_size = self.batch_size or 100
+
+        while True:
+            raw_states = self.db_reader.fetch_entity_states(
+                entity_id, current_timestamp, batch_size
+            )
+
+            if not raw_states:
+                logger.info(f"No new states to process for {entity_id}")
+                break
+
+            batch_max_ts = max(s["raw_timestamp"] for s in raw_states)
+            states = self.data_processor.process_states(raw_states)
+            cursor_update = {
+                entity_id: {
+                    "forward_cursor_ts": self.api_client._format_cursor_timestamp(
+                        batch_max_ts
+                    )
+                }
+            }
+
+            success = await self.api_client.send_batch(states, cursors=cursor_update)
+
+            if success:
+                current_timestamp = batch_max_ts
+                logger.info(
+                    f"Sent {len(states)} state records for {entity_id} "
+                    f"up to timestamp={current_timestamp}"
+                )
+            else:
+                logger.warning(
+                    f"Failed to send states batch for {entity_id}, will retry next cycle"
+                )
+                break
+
+            if len(raw_states) < batch_size:
+                break
+
+        return current_timestamp
+
     async def _process_states(self, after_timestamp: float) -> float:
         """Process states in batches. Returns the latest processed timestamp.
 
@@ -1431,7 +1559,7 @@ class EventExtractor:
         history would be re-fetched every cycle forever.
         """
         current_timestamp = after_timestamp
-        batch_size = self.batch_size
+        batch_size = self.batch_size or 100
         enabled = self._enabled_entity_ids
 
         while True:
